@@ -1,0 +1,54 @@
+# dt-agent — Isaac Sim 5.1 + FastMCP-SSE server
+#
+# Usage:
+#   docker compose build
+#   docker compose up
+#
+# The SSE endpoint will be reachable at http://localhost:8765/sse from the host.
+
+services:
+  isaac-sim:
+    build:
+      context: .
+      dockerfile: Dockerfile.isaacsim
+    container_name: dt-agent-sim
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - OMNI_KIT_ALLOW_ROOT=1
+    ports:
+      - "8765:8765"
+    volumes:
+      # Code mounted read-only — edit on host, restart container to pick up changes.
+      - ./src:/workspace/dt-agent/src:ro
+      - ./scripts:/workspace/dt-agent/scripts:ro
+      # Kit / Omniverse caches — named volumes so they survive container recreation.
+      # First boot will be slow (~minutes); subsequent boots fast.
+      - dt-agent-kit-cache:/isaac-sim/kit/cache
+      - dt-agent-ov-cache:/root/.cache/ov
+      - dt-agent-pip-cache:/root/.cache/pip
+      - dt-agent-gl-cache:/root/.cache/nvidia/GLCache
+      - dt-agent-compute-cache:/root/.nv/ComputeCache
+      - dt-agent-logs:/root/.nvidia-omniverse/logs
+      - dt-agent-data:/root/.local/share/ov/data
+    command:
+      - /isaac-sim/python.sh
+      - /workspace/dt-agent/src/dt_agent/sim_server.py
+    stdin_open: true
+    tty: true
+
+volumes:
+  dt-agent-kit-cache:
+  dt-agent-ov-cache:
+  dt-agent-pip-cache:
+  dt-agent-gl-cache:
+  dt-agent-compute-cache:
+  dt-agent-logs:
+  dt-agent-data:
