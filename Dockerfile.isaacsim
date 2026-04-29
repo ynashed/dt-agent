@@ -1,5 +1,10 @@
 FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
+# The base image's default user can't write to /opt; need root for the
+# snapshot tarball and the --target install prefix below. Runtime is fine
+# as root since docker-compose.yml sets OMNI_KIT_ALLOW_ROOT=1.
+USER root
+
 # Use bash for shell-glob expansion in the snapshot/restore RUN steps below.
 SHELL ["/bin/bash", "-c"]
 
