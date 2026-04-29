@@ -21,10 +21,26 @@ from isaacsim import SimulationApp  # type: ignore
 
 sim_app = SimulationApp({"headless": True})
 
-import asyncio
-import concurrent.futures
-import queue
-import threading
+# Kit's extensions prepend their bundled pip_prebundle dirs to sys.path during
+# boot, which shadows the (newer) transitive deps we installed to /opt/mcp-site
+# — most notably typing_extensions, where Kit ships a version older than the
+# one fastmcp's chain (key_value -> pydantic adapter) needs (TypeForm wasn't
+# added until typing_extensions 4.13). Re-prepend MCP_SITE and evict any stale
+# modules so the fastmcp import resolves against the right versions.
+import os  # noqa: E402
+import sys  # noqa: E402
+
+_mcp_site = os.environ.get("MCP_SITE", "/opt/mcp-site")
+if _mcp_site in sys.path:
+    sys.path.remove(_mcp_site)
+sys.path.insert(0, _mcp_site)
+for _stale in ("typing_extensions",):
+    sys.modules.pop(_stale, None)
+
+import asyncio  # noqa: E402
+import concurrent.futures  # noqa: E402
+import queue  # noqa: E402
+import threading  # noqa: E402
 
 import omni.usd  # noqa: E402  (import after SimulationApp is intentional)
 from fastmcp import FastMCP  # noqa: E402
