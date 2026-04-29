@@ -47,14 +47,35 @@ docker compose up         # boots Kit headless, starts HTTP RPC on :8765
 python scripts/sim_client_smoke.py
 ```
 
-Expected: the smoke client lists `{'tools': ['get_stage_info']}` and prints
-stage info returned from a real `omni.usd` call inside the running Isaac Sim
-instance.
+Expected: the smoke client lists the tool surface, then walks
+`create_primitive` → `set_transform` → `query_stage` → `save_stage` against
+a sphere at `/World/dt_agent_smoke_sphere`, finishing with a probe of
+`search_assets` against the in-image asset roots. Each step prints the
+`{result: ...}` returned by Kit.
 
-The container's bridge is a stdlib HTTP server (POST `/rpc`, GET `/tools`) —
-no external Python deps inside the Isaac Sim image, which avoids version
-clashes with Kit's bundled vendored libraries. The MCP layer that NAT will
-consume lives on the agent host (added later, in its own clean Python env).
+## RPC contract
+
+The container's bridge is a stdlib HTTP server (no external Python deps
+inside the Isaac Sim image — that avoids version clashes with Kit's
+bundled vendored libraries). The MCP layer NAT will consume lives on the
+agent host (added later, in its own clean Python env).
+
+- `GET  /tools`  →  `{"tools": ["get_stage_info", ...]}`
+- `POST /rpc`    →  body `{"tool": "<name>", "args": {...}}`
+                    →  `{"result": <json>}`  on success
+                    →  `{"error": "..."}`  on failure (also non-200)
+
+Phase 1 tool surface:
+
+| Tool | Args | Returns |
+|---|---|---|
+| `get_stage_info` | — | `{loaded, url, prim_count}` |
+| `query_stage` | `prim_path="/", depth=3` | `{root, prims: [{path, type, translate?}], truncated}` |
+| `create_primitive` | `prim_path, prim_type="Xform"` | `{ok, prim_path, type}` |
+| `add_reference_to_stage` | `usd_path, prim_path` | `{ok, prim_path, usd_path}` |
+| `set_transform` | `prim_path, translate?, rotate?, scale?` | `{ok, prim_path}` |
+| `save_stage` | `file_path` | `{ok, file_path}` |
+| `search_assets` | `query, limit=30, roots?` | `{matches, truncated}` |
 
 ## Layout
 
@@ -73,5 +94,11 @@ dt-agent/
 
 ## Status
 
-Phase 0 — bootstrap. LLM proxy validated. Isaac Sim container + MCP pipe wired
-but not yet smoke-tested end-to-end on this machine.
+**Phase 0 — bootstrap (done):** LLM proxy validated; Isaac Sim container +
+HTTP RPC pipe smoke-tested end-to-end.
+
+**Phase 1 — open-loop authoring (in progress):** tool surface for stage
+inspection and edit landed (`query_stage`, `create_primitive`,
+`add_reference_to_stage`, `set_transform`, `save_stage`, `search_assets`).
+Next: scripted demo flow exercising the tools to compose a workcell scene
+without an LLM in the loop, then layer the agent in Phase 2.
