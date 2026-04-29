@@ -38,8 +38,12 @@ services:
       - dt-agent-compute-cache:/root/.nv/ComputeCache
       - dt-agent-logs:/root/.nvidia-omniverse/logs
       - dt-agent-data:/root/.local/share/ov/data
+    # The base image's ENTRYPOINT is runheadless.sh (the streaming server).
+    # We need to fully override it to launch our MCP server instead, so we
+    # set both entrypoint and command — otherwise compose's `command` is
+    # just appended as args to runheadless.sh and silently ignored.
+    entrypoint: ["/isaac-sim/python.sh"]
     command:
-      - /isaac-sim/python.sh
       - /workspace/dt-agent/src/dt_agent/sim_server.py
     stdin_open: true
     tty: true
