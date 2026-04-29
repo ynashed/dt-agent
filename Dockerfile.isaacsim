@@ -1,45 +1,8 @@
 FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
-# The base image's default user can't write to /opt; need root for the
-# snapshot tarball and the --target install prefix below. Runtime is fine
-# as root since docker-compose.yml sets OMNI_KIT_ALLOW_ROOT=1.
+# Run as root so docker-compose's volume-mounted code is readable and so
+# the entrypoint can launch python.sh (matches OMNI_KIT_ALLOW_ROOT=1 in
+# the compose file).
 USER root
-
-# Use bash for shell-glob expansion in the snapshot/restore RUN steps below.
-SHELL ["/bin/bash", "-c"]
-
-# Why this dance:
-# Isaac Sim 5.1's bundled Python ships pinned, vendored copies of common
-# libraries inside several `pip_prebundle/` directories that sit on sys.path.
-# `pip install` against /isaac-sim/python.sh treats those as install targets
-# and silently clobbers them — which corrupts torch._vendor.packaging,
-# upgrades starlette out of sync with Kit's fastapi, deletes pyperclip, and
-# cascades into broken isaacsim.core.* and omni.services.* extensions.
-#
-# Workaround: snapshot the prebundle dirs, install MCP deps to a sidecar
-# prefix, then restore the prebundles. Isaac Sim stays intact; our deps are
-# reachable via PYTHONPATH.
-
-RUN tar -cpf /opt/_isaac_prebundle_backup.tar \
-        /isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle \
-        /isaac-sim/extscache/omni.kit.pip_archive-*/pip_prebundle \
-        /isaac-sim/extscache/omni.services.pip_archive-*/pip_prebundle
-
-ENV MCP_SITE=/opt/mcp-site
-
-# --ignore-installed: pip otherwise sees Kit's bundled pip_prebundle dirs
-# on sys.path (typing_extensions, anyio, etc.) and skips installing fresh
-# copies to /opt/mcp-site. Then at runtime fastmcp's transitive imports
-# fall through to Kit's older versions and break (e.g. TypeForm missing in
-# typing_extensions < 4.13). Force fresh, fully-self-contained installs.
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir --target=${MCP_SITE} \
-        --ignore-installed \
-        "fastmcp>=2.0" \
-        "python-dotenv>=1.0"
-
-RUN tar -xpf /opt/_isaac_prebundle_backup.tar -C / && \
-    rm /opt/_isaac_prebundle_backup.tar
-
-ENV PYTHONPATH=${MCP_SITE}
 
 WORKDIR /workspace/dt-agent

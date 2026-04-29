@@ -1,19 +1,35 @@
 """
-sim_server.py — Isaac Sim Kit + FastMCP-SSE server.
+sim_server.py — Isaac Sim Kit + minimal stdlib HTTP RPC server.
 
-Runs INSIDE the Isaac Sim container. Boots Kit headless, exposes an MCP server
-over SSE on port 8765, and routes tool calls onto Kit's main thread via a
-thread-safe job queue.
+Runs INSIDE the Isaac Sim container. Boots Kit headless and exposes a
+JSON-RPC-style HTTP endpoint on port 8765 for the agent host to invoke
+tools that read or modify Kit state.
+
+Why stdlib only
+---------------
+Isaac Sim's bundled Python ships dozens of pinned vendored packages
+(torch._vendor.packaging, fastapi, starlette, typing_extensions, etc.)
+on Kit's sys.path. Installing a modern web stack like fastmcp into that
+Python invariably collides with one of those vendored copies. So this
+side of the bridge speaks plain HTTP using only stdlib modules; the MCP
+layer lives on the agent host, where the Python environment is clean.
 
 Threading model
 ---------------
-- Main thread:    SimulationApp.update() loop; drains job queue once per frame.
-- FastMCP thread: Uvicorn/Starlette serves SSE; tools post callables to the
-                  queue and await the result. No omni APIs are called from this
-                  thread directly.
+- Main thread:    SimulationApp.update() loop; drains a job queue once
+                  per frame.
+- HTTP threads:   ThreadingHTTPServer; each request thread posts a
+                  callable to the queue and waits on its Future. No
+                  omni APIs are called from request threads directly.
 
-USD/render/Kit calls are not thread-safe in general, so all omni work goes
-through the queue and runs on the main thread.
+USD/render/Kit calls aren't thread-safe in general, so all omni work
+goes through the queue and runs on the main thread.
+
+Endpoints
+---------
+- GET  /tools      -> {"tools": [name, ...]}
+- POST /rpc        -> body: {"tool": <name>, "args": {...}}
+                      response: {"result": <json>}  or  {"error": "..."}
 """
 
 # SimulationApp must be constructed before any other omni.* import.
@@ -21,35 +37,19 @@ from isaacsim import SimulationApp  # type: ignore
 
 sim_app = SimulationApp({"headless": True})
 
-# Kit's extensions prepend their bundled pip_prebundle dirs to sys.path during
-# boot, which shadows the (newer) transitive deps we installed to /opt/mcp-site
-# — most notably typing_extensions, where Kit ships a version older than the
-# one fastmcp's chain (key_value -> pydantic adapter) needs (TypeForm wasn't
-# added until typing_extensions 4.13). Re-prepend MCP_SITE and evict any stale
-# modules so the fastmcp import resolves against the right versions.
-import os  # noqa: E402
-import sys  # noqa: E402
-
-_mcp_site = os.environ.get("MCP_SITE", "/opt/mcp-site")
-if _mcp_site in sys.path:
-    sys.path.remove(_mcp_site)
-sys.path.insert(0, _mcp_site)
-for _stale in ("typing_extensions",):
-    sys.modules.pop(_stale, None)
-
-import asyncio  # noqa: E402
 import concurrent.futures  # noqa: E402
+import json  # noqa: E402
 import queue  # noqa: E402
 import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 
 import omni.usd  # noqa: E402  (import after SimulationApp is intentional)
-from fastmcp import FastMCP  # noqa: E402
 
 
-# --- Thread-safe job queue ---------------------------------------------------
+# --- Thread-safe job queue (HTTP threads -> Kit main thread) ---
 
 class JobQueue:
-    """Side-thread tools post callables; main thread drains and runs them."""
+    """Request threads post callables; main thread drains and runs them."""
 
     def __init__(self) -> None:
         self._q: "queue.Queue[tuple]" = queue.Queue()
@@ -67,17 +67,17 @@ class JobQueue:
                 return
             try:
                 fut.set_result(fn(*args, **kwargs))
-            except Exception as e:  # propagate to the awaiting tool
+            except Exception as e:
                 fut.set_exception(e)
 
 
 jobs = JobQueue()
 
 
-# --- Main-thread tool implementations ----------------------------------------
+# --- Tool implementations (always run on Kit main thread via the queue) ---
 
 def _impl_get_stage_info() -> dict:
-    """Read current stage URL + prim count. Runs on main thread."""
+    """Return the currently loaded USD stage URL and total prim count."""
     ctx = omni.usd.get_context()
     stage = ctx.get_stage()
     if stage is None:
@@ -89,28 +89,70 @@ def _impl_get_stage_info() -> dict:
     }
 
 
-# --- FastMCP server (side thread) --------------------------------------------
-
-mcp = FastMCP("isaacsim-mcp")
-
-
-@mcp.tool()
-async def get_stage_info() -> dict:
-    """Return the currently loaded USD stage URL and total prim count."""
-    return await asyncio.wrap_future(jobs.submit(_impl_get_stage_info))
+TOOLS = {
+    "get_stage_info": _impl_get_stage_info,
+}
 
 
-def _run_mcp_server() -> None:
-    # mcp.run() is blocking and starts its own asyncio loop in this thread.
-    mcp.run(transport="sse", host="0.0.0.0", port=8765)
+# --- HTTP handler ---
+
+class RPCHandler(BaseHTTPRequestHandler):
+    def _json(self, code: int, body: dict) -> None:
+        payload = json.dumps(body).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:
+        if self.path == "/tools":
+            self._json(200, {"tools": list(TOOLS.keys())})
+        else:
+            self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:
+        if self.path != "/rpc":
+            self._json(404, {"error": "not found"})
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except Exception as e:
+            self._json(400, {"error": f"bad json: {e}"})
+            return
+        tool = body.get("tool")
+        if tool not in TOOLS:
+            self._json(400, {"error": f"unknown tool: {tool}"})
+            return
+        fut = jobs.submit(TOOLS[tool])
+        try:
+            result = fut.result(timeout=30.0)
+        except Exception as e:
+            self._json(500, {"error": f"{type(e).__name__}: {e}"})
+            return
+        self._json(200, {"result": result})
+
+    # Silence the default per-request stderr access log; Kit's logger is
+    # noisy enough without us doubling up.
+    def log_message(self, format, *args):
+        pass
 
 
-threading.Thread(target=_run_mcp_server, daemon=True, name="fastmcp-sse").start()
+def _run_http() -> None:
+    server = ThreadingHTTPServer(("0.0.0.0", 8765), RPCHandler)
+    server.serve_forever()
 
 
-# --- Main loop ---------------------------------------------------------------
+threading.Thread(target=_run_http, daemon=True, name="rpc-http").start()
 
-print("[sim_server] Kit booted, FastMCP-SSE listening on :8765/sse", flush=True)
+
+# --- Main loop ---
+
+print(
+    "[sim_server] Kit booted, HTTP RPC listening on :8765 (POST /rpc, GET /tools)",
+    flush=True,
+)
 
 try:
     while sim_app.is_running():

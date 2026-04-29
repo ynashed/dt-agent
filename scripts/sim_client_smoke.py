@@ -1,36 +1,44 @@
 """
-sim_client_smoke.py — Validate the FastMCP SSE pipe to the Isaac Sim container.
+sim_client_smoke.py — Validate the HTTP RPC pipe to the Isaac Sim container.
 
-Runs on the host. Connects to the SSE endpoint published by sim_server.py,
-lists tools, calls get_stage_info, and prints the result.
+Runs on the host. Lists available tools, calls get_stage_info, and prints
+the result. Uses stdlib urllib so it works without installing any host-side
+deps for this validator.
 
     python scripts/sim_client_smoke.py
 """
-import asyncio
+import json
 import sys
+import urllib.error
+import urllib.request
 
-from fastmcp import Client
-
-SSE_URL = "http://localhost:8765/sse"
+BASE = "http://localhost:8765"
 
 
-async def main() -> int:
+def main() -> int:
     try:
-        async with Client(SSE_URL) as client:
-            tools = await client.list_tools()
-            print(f"[smoke] tools: {[t.name for t in tools]}")
+        with urllib.request.urlopen(f"{BASE}/tools", timeout=10) as r:
+            tools = json.loads(r.read())
+        print(f"[smoke] tools: {tools}")
 
-            result = await client.call_tool("get_stage_info", {})
-            print(f"[smoke] get_stage_info: {result.data if hasattr(result, 'data') else result}")
+        req = urllib.request.Request(
+            f"{BASE}/rpc",
+            data=json.dumps({"tool": "get_stage_info"}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            result = json.loads(r.read())
+        print(f"[smoke] get_stage_info: {result}")
         return 0
+    except urllib.error.URLError as e:
+        print(f"[smoke] FAILED to reach {BASE}: {e}", file=sys.stderr)
+        print("[smoke] Is the container running? Try: docker compose up", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"[smoke] FAILED: {type(e).__name__}: {e}", file=sys.stderr)
-        print(
-            "[smoke] Is the container running? Try: docker compose up",
-            file=sys.stderr,
-        )
         return 1
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(main())
