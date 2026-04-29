@@ -1,9 +1,34 @@
 FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
-# Install MCP server deps into Isaac Sim's bundled Python.
-# python.sh wraps the embedded interpreter with the right env vars.
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
+# Use bash for shell-glob expansion in the snapshot/restore RUN steps below.
+SHELL ["/bin/bash", "-c"]
+
+# Why this dance:
+# Isaac Sim 5.1's bundled Python ships pinned, vendored copies of common
+# libraries inside several `pip_prebundle/` directories that sit on sys.path.
+# `pip install` against /isaac-sim/python.sh treats those as install targets
+# and silently clobbers them — which corrupts torch._vendor.packaging,
+# upgrades starlette out of sync with Kit's fastapi, deletes pyperclip, and
+# cascades into broken isaacsim.core.* and omni.services.* extensions.
+#
+# Workaround: snapshot the prebundle dirs, install MCP deps to a sidecar
+# prefix, then restore the prebundles. Isaac Sim stays intact; our deps are
+# reachable via PYTHONPATH.
+
+RUN tar -cpf /opt/_isaac_prebundle_backup.tar \
+        /isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle \
+        /isaac-sim/extscache/omni.kit.pip_archive-*/pip_prebundle \
+        /isaac-sim/extscache/omni.services.pip_archive-*/pip_prebundle
+
+ENV MCP_SITE=/opt/mcp-site
+
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir --target=${MCP_SITE} \
         "fastmcp>=2.0" \
         "python-dotenv>=1.0"
+
+RUN tar -xpf /opt/_isaac_prebundle_backup.tar -C / && \
+    rm /opt/_isaac_prebundle_backup.tar
+
+ENV PYTHONPATH=${MCP_SITE}
 
 WORKDIR /workspace/dt-agent
