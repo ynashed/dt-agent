@@ -9,8 +9,14 @@ authoring flow end-to-end:
 Plus a `search_assets` probe to confirm the asset roots are reachable.
 Uses stdlib urllib so no host-side deps are needed.
 
-    python scripts/sim_client_smoke.py
+Usage:
+    python scripts/sim_client_smoke.py                  # standard smoke flow
+    python scripts/sim_client_smoke.py --probe-s3       # + check Kit can
+                                                          fetch USD over HTTPS
+    python scripts/sim_client_smoke.py --probe-s3 \\
+        --s3-url <full URL>                             # try a different URL
 """
+import argparse
 import json
 import sys
 import urllib.error
@@ -19,6 +25,14 @@ import urllib.request
 BASE = "http://localhost:8765"
 TEST_PRIM = "/World/dt_agent_smoke_sphere"
 SAVE_PATH = "/workspace/dt-agent/output/smoke_test.usda"
+
+# Probe target — a known-named asset on NVIDIA's production OpenUSD CDN.
+# If this 404s the URL pattern may have shifted (use --s3-url to override).
+DEFAULT_S3_URL = (
+    "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+    "/Assets/Isaac/5.1/Isaac/Robots/UniversalRobots/ur10e/ur10e.usd"
+)
+S3_PROBE_PRIM = "/World/dt_agent_s3_probe"
 
 
 def _rpc(tool: str, **args):
@@ -88,5 +102,55 @@ def main() -> int:
         return 1
 
 
+def s3_probe(url: str) -> int:
+    """Probe whether Kit's URL resolver inside the container can fetch a USD
+    asset over HTTPS. Adds a reference at S3_PROBE_PRIM, then inspects the
+    subtree — real descendants mean the fetch landed."""
+    print(f"[s3-probe] target: {url}")
+    try:
+        added = _rpc("add_reference_to_stage", prim_path=S3_PROBE_PRIM, usd_path=url)
+        print(f"[s3-probe] add_reference_to_stage: {added}")
+
+        sub = _rpc("query_stage", prim_path=S3_PROBE_PRIM, depth=2)
+        prims = sub.get("prims", [])
+        # First entry is the root we created; descendants only count if there
+        # are entries past index 0.
+        descendants = prims[1:]
+        if not descendants:
+            print(f"[s3-probe] NO DESCENDANTS — Kit didn't resolve {url}.", file=sys.stderr)
+            print(
+                "[s3-probe] Either the container has no HTTPS egress, or the "
+                "URL is wrong. Try --s3-url with a known-good asset URL.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"[s3-probe] OK — {len(descendants)} descendants under {S3_PROBE_PRIM}:")
+        for p in descendants[:8]:
+            print(f"            {p['path']}  [{p['type']}]")
+        if len(descendants) > 8:
+            print(f"            ... ({len(descendants) - 8} more)")
+        return 0
+    except Exception as e:
+        print(f"[s3-probe] FAILED: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    parser.add_argument(
+        "--probe-s3",
+        action="store_true",
+        help="After the smoke flow, probe whether Kit can fetch USD assets "
+             "from NVIDIA's S3 OpenUSD CDN over HTTPS.",
+    )
+    parser.add_argument(
+        "--s3-url",
+        default=DEFAULT_S3_URL,
+        help="Override the URL used for the S3 probe.",
+    )
+    args = parser.parse_args()
+
+    rc = main()
+    if args.probe_s3 and rc == 0:
+        rc = s3_probe(args.s3_url)
+    sys.exit(rc)
