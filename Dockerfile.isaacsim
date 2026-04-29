@@ -27,7 +27,13 @@ RUN tar -cpf /opt/_isaac_prebundle_backup.tar \
 
 ENV MCP_SITE=/opt/mcp-site
 
+# --ignore-installed: pip otherwise sees Kit's bundled pip_prebundle dirs
+# on sys.path (typing_extensions, anyio, etc.) and skips installing fresh
+# copies to /opt/mcp-site. Then at runtime fastmcp's transitive imports
+# fall through to Kit's older versions and break (e.g. TypeForm missing in
+# typing_extensions < 4.13). Force fresh, fully-self-contained installs.
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir --target=${MCP_SITE} \
+        --ignore-installed \
         "fastmcp>=2.0" \
         "python-dotenv>=1.0"
 
