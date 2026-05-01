@@ -1,0 +1,148 @@
+"""
+vlm.py — VLM observation wrapper for the dt-agent loop.
+
+Wraps NVIDIA's Cosmos Reason 2 8B (hosted at integrate.api.nvidia.com,
+the build.nvidia.com NIM proxy) with a Pydantic-schema-constrained
+`observe(image_path, intent) -> Observation` function. Cosmos Reason is
+specialized for physical-world reasoning, which is what we want for
+"did this edit have the intended visible effect on the scene?"
+
+Lives on the agent host — Kit's Python doesn't see this module. The
+container only needs to know how to render a PNG; everything VLM-related
+runs in the host venv with normal modern deps.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+from pathlib import Path
+
+from openai import OpenAI
+from pydantic import BaseModel, Field
+
+VLM_BASE_URL = os.environ.get(
+    "NV_VLM_BASE_URL", "https://integrate.api.nvidia.com/v1"
+)
+VLM_MODEL = os.environ.get("NV_VLM_MODEL", "nvidia/cosmos-reason2-8b")
+
+
+class Observation(BaseModel):
+    """Structured response the VLM emits about a captured frame."""
+
+    intent_satisfied: bool = Field(
+        description="True if the captured frame visibly matches the stated intent."
+    )
+    observed: str = Field(
+        description="One or two sentence description of what is actually in the frame."
+    )
+    issues: list[str] = Field(
+        default_factory=list,
+        description="Discrete things that look wrong or unexpected. Empty if intent_satisfied is true.",
+    )
+    correction_hint: str | None = Field(
+        default=None,
+        description="Natural-language guidance for the LLM about what to change next. Null if no fix needed.",
+    )
+
+
+SYSTEM_PROMPT = """You are a vision-language observer for a digital-twin authoring agent.
+You receive a single rendered frame of an Isaac Sim scene plus an `intent` string
+describing what the scene SHOULD look like. Compare what you see to the intent.
+
+Reply with ONLY a JSON object with exactly these keys:
+
+{
+  "intent_satisfied": <bool>,
+  "observed": <string, 1-2 sentences describing what is actually in the frame>,
+  "issues": [<string>, ...],
+  "correction_hint": <string or null>
+}
+
+- "issues": one concrete problem per entry, e.g. "the robot arm is floating
+  above the table" or "no microplates are visible on the conveyor". Empty
+  list if intent_satisfied is true.
+- "correction_hint": brief natural-language guidance for the next edit, e.g.
+  "lower the UR10e by ~5cm so its base sits on the table top". Null if
+  intent_satisfied is true.
+
+Emit ONLY the JSON object. No markdown fences, no preamble, no commentary."""
+
+
+def _data_uri(path: str | Path) -> str:
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(str(p))
+    suffix = p.suffix.lower().lstrip(".")
+    if suffix == "jpg":
+        suffix = "jpeg"
+    if suffix not in {"png", "jpeg"}:
+        raise ValueError(f"unsupported image type: .{suffix}")
+    b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+    return f"data:image/{suffix};base64,{b64}"
+
+
+def _strip_fences(text: str) -> str:
+    """Defensive: if the model wrapped its JSON in ```json ... ``` despite
+    being told not to, strip the fences before parsing."""
+    text = text.strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def observe(
+    image_path: str | Path,
+    intent: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    max_tokens: int = 600,
+) -> Observation:
+    """Send a captured frame to Cosmos Reason and return a parsed Observation.
+
+    Raises FileNotFoundError if image_path doesn't exist, RuntimeError on
+    API/parse failures, and pydantic.ValidationError if the model returns
+    valid JSON but with the wrong shape.
+    """
+    api_key = api_key or os.environ.get("NV_VLM_API_KEY") or os.environ.get("NV_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "No API key available — set NV_API_KEY (or NV_VLM_API_KEY) "
+            "in the environment or .env."
+        )
+
+    client = OpenAI(api_key=api_key, base_url=base_url or VLM_BASE_URL)
+
+    response = client.chat.completions.create(
+        model=model or VLM_MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"Intent: {intent}"},
+                    {"type": "image_url", "image_url": {"url": _data_uri(image_path)}},
+                ],
+            },
+        ],
+        max_tokens=max_tokens,
+        temperature=0.0,
+    )
+
+    raw = (response.choices[0].message.content or "").strip()
+    cleaned = _strip_fences(raw)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"VLM response was not valid JSON ({e}). "
+            f"First 500 chars of response: {cleaned[:500]!r}"
+        ) from e
+    return Observation.model_validate(data)

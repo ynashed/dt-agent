@@ -69,6 +69,19 @@ stand-ins (Cube primitives) — and saves to
 `/workspace/dt-agent/output/workcell.usda` inside the container. Proves the
 RPC tool surface composes into a real scene before the LLM is in the loop.
 
+**VLM observation (Phase 2.0):**
+
+```bash
+# Use the same NV_API_KEY from .env that hello_inference.py uses.
+python scripts/observe_capture.py output/captures/capture_<latest>.png \
+    "the UR10e should sit on the table; three microplates should be on the conveyor"
+```
+
+Sends the PNG to Cosmos Reason 2 8B at `integrate.api.nvidia.com` and
+prints a structured `Observation` JSON: `{intent_satisfied, observed,
+issues, correction_hint}`. That `correction_hint` is what the agent loop
+in Phase 2.5 will feed back to the LLM as the "what to fix next" signal.
+
 ## RPC contract
 
 The container's bridge is a stdlib HTTP server (no external Python deps
@@ -121,10 +134,12 @@ dt-agent/
 │   └── asset_catalog.json       # Curated NVIDIA OpenUSD CDN URLs
 ├── src/dt_agent/
 │   ├── __init__.py
-│   └── sim_server.py            # Runs in container: Kit + stdlib HTTP RPC (threaded)
+│   ├── sim_server.py            # Runs in container: Kit + stdlib HTTP RPC (threaded)
+│   └── vlm.py                   # Runs on host: Cosmos Reason wrapper -> Observation
 └── scripts/
     ├── sim_client_smoke.py      # Runs on host: validates the RPC pipe (--probe-s3 optional)
-    └── build_workcell.py        # Runs on host: composes a benchtop workcell scene
+    ├── build_workcell.py        # Runs on host: composes a benchtop workcell scene
+    └── observe_capture.py       # Runs on host: VLM observation of a captured PNG
 ```
 
 ## Status
@@ -139,10 +154,15 @@ top of NVIDIA's OpenUSD CDN with HTTPS fetch confirmed. Scripted workcell
 demo composes table + UR10e + conveyor + microplates without an LLM, opens
 in Isaac Sim GUI on the host.
 
-**Phase 1.5 — viewport capture (in progress):** `capture_viewport` RPC
-renders a fixed-pose observation camera to PNG so the upcoming VLM step
-has something to observe. Saves to `./output/captures/`.
+**Phase 1.5 — viewport capture (done):** `capture_viewport` RPC renders a
+fixed-pose observation camera to PNG. Saves to `./output/captures/`.
 
-**Phase 2 — closed-loop with VLM:** wire Cosmos Reason via build.nvidia.com
-to consume captures and emit Pydantic-schema-constrained corrections. Layer
-the LLM agent (NAT or thin custom) on top.
+**Phase 2.0 — VLM observation (in progress):** `dt_agent.vlm.observe(image, intent)`
+sends a captured frame to **Cosmos Reason 2 8B** at
+`integrate.api.nvidia.com` and returns a Pydantic-validated `Observation`
+(intent_satisfied, observed, issues, correction_hint). Standalone CLI:
+`scripts/observe_capture.py`.
+
+**Phase 2.5 — agent loop:** wire GPT-5.3-codex + the RPC tools + the VLM
+observer into a plan→edit→capture→observe→reflect loop. NAT graph or
+thin custom orchestration — TBD.
