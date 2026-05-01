@@ -385,14 +385,15 @@ def _ensure_default_lighting(light_path: str = DEFAULT_OBSERVATION_LIGHT) -> Non
     """Create a DomeLight at `light_path` if missing. Without lights, the
     bare default stage + our Cube primitives render as a uniform near-black
     buffer, which looks identical to a render that didn't complete.
-    Idempotent — won't touch an existing light."""
+    Idempotent — won't touch an existing light. Intensity 300 is a neutral
+    indoor baseline; higher saturates the RTX tone mapper to white."""
     stage = _stage()
     if stage is None:
         raise RuntimeError("no stage loaded")
     if stage.GetPrimAtPath(light_path).IsValid():
         return
     dome = UsdLux.DomeLight.Define(stage, light_path)
-    dome.CreateIntensityAttr(1500.0)
+    dome.CreateIntensityAttr(300.0)
     dome.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
 
 
