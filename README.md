@@ -42,12 +42,30 @@ python hello_inference.py
 Expected: a one-sentence description of Isaac Sim, returned via the NV
 inference proxy / Responses API.
 
-**Isaac Sim container + RPC pipe:**
+**Isaac Sim container + Cosmos Reason 2 8B NIM:**
+
+The compose stack runs two services side-by-side: `isaac-sim` (rendering +
+RPC) on GPU 0, and `vlm` (Cosmos Reason 2 8B) on GPU 1.
+
+One-time setup:
 
 ```bash
-docker compose build      # one-time; ~minutes for first base-image pull
-docker compose up         # boots Kit headless, starts HTTP RPC on :8765
-# In another shell:
+# Log in to NGC so docker can pull the NIM image.
+# Get an NGC API key at https://ngc.nvidia.com/setup/api-key.
+docker login nvcr.io -u '$oauthtoken' -p $NGC_API_KEY
+
+# Pre-pull the NIM (~tens of GB; first run will also fetch model weights).
+docker compose pull vlm
+```
+
+Run:
+
+```bash
+docker compose build      # one-time for isaac-sim; ~minutes for first base-image pull
+docker compose up         # starts both services
+                          # isaac-sim:  http://localhost:8765
+                          # vlm:        http://localhost:8000  (~10 min first warmup)
+# In another shell, once both are up:
 python scripts/sim_client_smoke.py
 ```
 
@@ -76,15 +94,19 @@ RPC tool surface composes into a real scene before the LLM is in the loop.
 **VLM observation (Phase 2.0):**
 
 ```bash
-# Use the same NV_API_KEY from .env that hello_inference.py uses.
 python scripts/observe_capture.py output/captures/capture_<latest>.png \
     "the UR10e should sit on the table; three microplates should be on the conveyor"
 ```
 
-Sends the PNG to Cosmos Reason 2 8B at `integrate.api.nvidia.com` and
-prints a structured `Observation` JSON: `{intent_satisfied, observed,
-issues, correction_hint}`. That `correction_hint` is what the agent loop
-in Phase 2.5 will feed back to the LLM as the "what to fix next" signal.
+Sends the PNG to the local Cosmos Reason 2 8B NIM at
+`http://localhost:8000` (default in `.env.example`) and prints a structured
+`Observation` JSON: `{intent_satisfied, observed, issues, correction_hint}`.
+That `correction_hint` is what the agent loop in Phase 2.5 will feed back
+to the LLM as the "what to fix next" signal.
+
+To use the NVIDIA-hosted variant on `integrate.api.nvidia.com` instead,
+unset `NV_VLM_BASE_URL` and supply `NV_VLM_API_KEY` from the build.nvidia.com
+panel (see `.env.example`).
 
 ## RPC contract
 

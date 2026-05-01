@@ -96,6 +96,13 @@ def _strip_fences(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "://vlm:", "://vlm/")
+
+
+def _is_local_endpoint(url: str) -> bool:
+    return any(needle in url for needle in _LOCAL_HOSTS)
+
+
 def observe(
     image_path: str | Path,
     intent: str,
@@ -111,14 +118,23 @@ def observe(
     API/parse failures, and pydantic.ValidationError if the model returns
     valid JSON but with the wrong shape.
     """
+    effective_url = base_url or VLM_BASE_URL
     api_key = api_key or os.environ.get("NV_VLM_API_KEY") or os.environ.get("NV_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "No API key available — set NV_API_KEY (or NV_VLM_API_KEY) "
-            "in the environment or .env."
-        )
+        if _is_local_endpoint(effective_url):
+            # Self-hosted NIM (e.g. the docker-compose vlm service at
+            # http://localhost:8000/v1) doesn't authenticate the chat
+            # completions endpoint — but the OpenAI SDK requires a non-empty
+            # api_key parameter, so pass a placeholder.
+            api_key = "not-needed"
+        else:
+            raise RuntimeError(
+                "No API key available — set NV_API_KEY (or NV_VLM_API_KEY) "
+                "in the environment or .env, or point NV_VLM_BASE_URL at a "
+                "local NIM (e.g. http://localhost:8000/v1)."
+            )
 
-    client = OpenAI(api_key=api_key, base_url=base_url or VLM_BASE_URL)
+    client = OpenAI(api_key=api_key, base_url=effective_url)
 
     response = client.chat.completions.create(
         model=model or VLM_MODEL,

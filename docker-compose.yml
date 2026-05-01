@@ -1,10 +1,18 @@
-# dt-agent — Isaac Sim 5.1 + FastMCP-SSE server
+# dt-agent — Isaac Sim 5.1 + Cosmos Reason 2 8B NIM (self-hosted VLM)
 #
 # Usage:
-#   docker compose build
-#   docker compose up
+#   docker login nvcr.io -u '$oauthtoken' -p $NGC_API_KEY    # one-time
+#   docker compose pull vlm                                  # pulls NIM image
+#   docker compose build                                     # builds isaac-sim
+#   docker compose up                                        # starts both
 #
-# The SSE endpoint will be reachable at http://localhost:8765/sse from the host.
+# Endpoints (host):
+#   http://localhost:8765   — Isaac Sim HTTP RPC (sim_server.py)
+#   http://localhost:8000   — Cosmos Reason 2 8B chat completions
+#
+# GPU layout (2x RTX 6000 Pro Blackwell):
+#   GPU 0 -> isaac-sim   (rendering + physics)
+#   GPU 1 -> vlm         (Cosmos Reason 2 8B inference)
 
 services:
   isaac-sim:
@@ -17,7 +25,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["0"]
               capabilities: [gpu]
     environment:
       - ACCEPT_EULA=Y
@@ -52,6 +60,31 @@ services:
     stdin_open: true
     tty: true
 
+  vlm:
+    image: nvcr.io/nim/nvidia/cosmos-reason2-8b:latest
+    container_name: dt-agent-vlm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    # NIM pattern from the build.nvidia.com deploy page: needs --ipc host
+    # and a generous shared-memory budget for model loading.
+    ipc: host
+    shm_size: 32gb
+    environment:
+      # Required for the NIM to validate / re-fetch model weights from NGC
+      # at runtime. Pulled from .env by docker compose.
+      - NGC_API_KEY=${NGC_API_KEY}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist model weights across restarts — first-run download is large
+      # (several GB) and slow; this makes subsequent starts fast.
+      - dt-agent-vlm-cache:/opt/nim/.cache
+
 volumes:
   dt-agent-kit-cache:
   dt-agent-ov-cache:
@@ -60,3 +93,4 @@ volumes:
   dt-agent-compute-cache:
   dt-agent-logs:
   dt-agent-data:
+  dt-agent-vlm-cache:
