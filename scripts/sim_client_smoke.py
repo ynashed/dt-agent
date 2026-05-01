@@ -98,6 +98,10 @@ def main() -> int:
             if m.get("name") and m.get("path") != m.get("name"):
                 print(f"             {m['path']}")
 
+        # 8. Viewport capture — fixed-pose observation camera, PNG to ./output/captures/
+        cap = _rpc("capture_viewport")
+        print(f"[smoke] capture_viewport: {cap}")
+
         return 0
 
     except urllib.error.URLError as e:

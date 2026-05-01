@@ -92,6 +92,7 @@ Phase 1 tool surface:
 | `set_transform` | `prim_path, translate?, rotate?, scale?` | `{ok, prim_path}` |
 | `save_stage` | `file_path` | `{ok, file_path}` |
 | `search_assets` | `query, limit=30, roots?, sources?` | `{matches: [{path, source, name?, description?, category?, verified?}], truncated}` |
+| `capture_viewport` | `camera_path?, eye?, target?, resolution?, file_path?` | `{ok, file_path, camera_path, resolution, size}` |
 
 `search_assets` queries two sources by default — the curated catalog at
 `catalog/asset_catalog.json` (HTTPS URLs on NVIDIA's OpenUSD CDN) and the
@@ -99,6 +100,14 @@ local filesystem under `_DEFAULT_ASSET_ROOTS`. Pass `sources=["catalog"]`
 or `sources=["filesystem"]` to restrict. Catalog matches include `name`,
 `description`, `category`, and a `verified` flag indicating whether the
 URL was confirmed to fetch successfully against this image.
+
+`capture_viewport` renders the scene from a fixed-pose observation camera
+(default `/World/_dt_observation_cam`, look-at the workcell origin from
+`(3, 3, 2)`) via `omni.replicator.core` and saves a PNG to
+`/workspace/dt-agent/output/captures/` (which the host sees under
+`./output/captures/`). The default camera is created on first call and its
+transform is refreshed each call. Pass an explicit `camera_path` to render
+from an existing camera prim with whatever transform it already has.
 
 ## Layout
 
@@ -123,10 +132,17 @@ dt-agent/
 **Phase 0 — bootstrap (done):** LLM proxy validated; Isaac Sim container +
 HTTP RPC pipe smoke-tested end-to-end.
 
-**Phase 1 — open-loop authoring (in progress):** tool surface for stage
-inspection and edit landed (`query_stage`, `create_primitive`,
-`add_reference_to_stage`, `set_transform`, `save_stage`, `search_assets`).
-Curated asset catalog on top of NVIDIA's OpenUSD CDN, with HTTPS fetch
-inside the container confirmed working. Scripted workcell demo composes a
-table + UR10e + conveyor + microplates without an LLM. Next: layer the
-agent in Phase 2.
+**Phase 1 — open-loop authoring (done):** tool surface for stage inspection
+and edit (`query_stage`, `create_primitive`, `add_reference_to_stage`,
+`set_transform`, `save_stage`, `search_assets`). Curated asset catalog on
+top of NVIDIA's OpenUSD CDN with HTTPS fetch confirmed. Scripted workcell
+demo composes table + UR10e + conveyor + microplates without an LLM, opens
+in Isaac Sim GUI on the host.
+
+**Phase 1.5 — viewport capture (in progress):** `capture_viewport` RPC
+renders a fixed-pose observation camera to PNG so the upcoming VLM step
+has something to observe. Saves to `./output/captures/`.
+
+**Phase 2 — closed-loop with VLM:** wire Cosmos Reason via build.nvidia.com
+to consume captures and emit Pydantic-schema-constrained corrections. Layer
+the LLM agent (NAT or thin custom) on top.

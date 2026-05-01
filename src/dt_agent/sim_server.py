@@ -42,6 +42,7 @@ import json  # noqa: E402
 import os  # noqa: E402
 import queue  # noqa: E402
 import threading  # noqa: E402
+import time  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 
 import omni.usd  # noqa: E402  (import after SimulationApp is intentional)
@@ -319,6 +320,153 @@ def _impl_search_assets(
     return {"matches": matches, "truncated": False}
 
 
+# --- Viewport capture ---------------------------------------------------
+#
+# Phase 1.5 — render a fixed-pose observation camera to a PNG file the agent
+# host (and the VLM observer) can consume. We use omni.replicator.core's
+# render_product + LdrColor annotator to drive the render in headless mode,
+# and Pillow (bundled with Isaac Sim) to encode the PNG. Render product +
+# annotator are cached at module level so repeat captures don't leak Kit
+# resources.
+
+DEFAULT_OBSERVATION_CAMERA = "/World/_dt_observation_cam"
+# Default 3/4 view of the workcell-shaped neighborhood near origin. Eye and
+# target are overridable per call via kwargs, but for the fixed-pose mode
+# the agent is expected to hit these defaults so the same view repeats.
+DEFAULT_CAMERA_EYE = (3.0, 3.0, 2.0)
+DEFAULT_CAMERA_TARGET = (0.6, 0.0, 0.45)
+DEFAULT_RESOLUTION = (1280, 720)
+CAPTURE_OUTPUT_DIR = "/workspace/dt-agent/output/captures"
+
+_capture_state = {
+    "render_product": None,
+    "annotator": None,
+    "camera_path": None,
+    "resolution": None,
+}
+
+
+def _look_at_matrix(eye, target, up=(0.0, 0.0, 1.0)) -> "Gf.Matrix4d":
+    """Build a camera-to-world Matrix4d so a USD camera at `eye` looks at
+    `target` with the given world up. USD cameras face their local -Z."""
+    eye_v = Gf.Vec3d(*eye)
+    target_v = Gf.Vec3d(*target)
+    up_v = Gf.Vec3d(*up)
+    forward = (target_v - eye_v).GetNormalized()
+    right = Gf.Cross(forward, up_v).GetNormalized()
+    true_up = Gf.Cross(right, forward).GetNormalized()
+    return Gf.Matrix4d(
+        right[0], right[1], right[2], 0.0,
+        true_up[0], true_up[1], true_up[2], 0.0,
+        -forward[0], -forward[1], -forward[2], 0.0,
+        eye_v[0], eye_v[1], eye_v[2], 1.0,
+    )
+
+
+def _ensure_observation_camera(camera_path: str, eye, target) -> None:
+    """Create the camera prim if missing, then (re)set its transform to a
+    look-at pose. Idempotent; safe to call every capture."""
+    stage = _stage()
+    if stage is None:
+        raise RuntimeError("no stage loaded")
+    prim = stage.GetPrimAtPath(camera_path)
+    if not prim.IsValid():
+        cam = UsdGeom.Camera.Define(stage, camera_path)
+        cam.GetFocalLengthAttr().Set(24.0)
+        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))
+    cam = UsdGeom.Camera(stage.GetPrimAtPath(camera_path))
+    xform = UsdGeom.Xformable(cam)
+    xform.ClearXformOpOrder()
+    xform.AddTransformOp().Set(_look_at_matrix(eye, target))
+
+
+def _impl_capture_viewport(
+    camera_path: str | None = None,
+    eye: list | None = None,
+    target: list | None = None,
+    resolution: list | None = None,
+    file_path: str | None = None,
+) -> dict:
+    """Render the scene from an observation camera and save a PNG.
+
+    With all args defaulted, captures from the fixed-pose default camera
+    (`/World/_dt_observation_cam`) — created on first call, transform
+    refreshed on each call. Pass `camera_path` to use an already-existing
+    camera prim instead. `eye` / `target` only affect the default camera;
+    explicit `camera_path` uses whatever transform that prim already has.
+    `file_path` defaults to a timestamped name under
+    `/workspace/dt-agent/output/captures/`.
+    """
+    import omni.replicator.core as rep  # imported lazily; avoids touching
+                                        # replicator at module load if no
+                                        # one is using this tool.
+
+    using_default = camera_path is None
+    cam_path = camera_path or DEFAULT_OBSERVATION_CAMERA
+    eye_v = tuple(eye) if eye is not None else DEFAULT_CAMERA_EYE
+    target_v = tuple(target) if target is not None else DEFAULT_CAMERA_TARGET
+    res = tuple(resolution) if resolution is not None else DEFAULT_RESOLUTION
+
+    if using_default:
+        _ensure_observation_camera(cam_path, eye_v, target_v)
+    else:
+        # Verify the requested camera exists.
+        prim = _stage().GetPrimAtPath(cam_path)
+        if not prim.IsValid():
+            return {"error": f"camera prim not found: {cam_path}"}
+
+    # (Re)build the render product if camera or resolution changed.
+    if (
+        _capture_state["camera_path"] != cam_path
+        or _capture_state["resolution"] != res
+        or _capture_state["render_product"] is None
+    ):
+        _capture_state["render_product"] = rep.create.render_product(cam_path, res)
+        _capture_state["annotator"] = rep.AnnotatorRegistry.get_annotator("LdrColor")
+        _capture_state["annotator"].attach([_capture_state["render_product"]])
+        _capture_state["camera_path"] = cam_path
+        _capture_state["resolution"] = res
+
+    # Step a few frames so textures, lighting, and any pending USD edits
+    # land before we sample the render buffer.
+    for _ in range(3):
+        sim_app.update()
+    rep.orchestrator.step()
+    for _ in range(2):
+        sim_app.update()
+
+    data = _capture_state["annotator"].get_data()
+    if data is None or getattr(data, "size", 0) == 0:
+        return {"error": "annotator returned empty data; render may not have completed"}
+
+    if file_path is None:
+        os.makedirs(CAPTURE_OUTPUT_DIR, exist_ok=True)
+        file_path = os.path.join(
+            CAPTURE_OUTPUT_DIR, f"capture_{int(time.time() * 1000)}.png"
+        )
+    else:
+        parent = os.path.dirname(file_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+    try:
+        from PIL import Image
+        mode = "RGBA" if data.shape[-1] == 4 else "RGB"
+        Image.fromarray(data, mode=mode).save(file_path)
+    except ImportError:
+        return {"error": "PIL/Pillow not available in Kit's bundled Python"}
+    except Exception as e:
+        return {"error": f"PNG encode failed: {type(e).__name__}: {e}"}
+
+    return {
+        "ok": True,
+        "file_path": file_path,
+        "camera_path": cam_path,
+        "resolution": [int(res[0]), int(res[1])],
+        "size": [int(data.shape[1]), int(data.shape[0])],
+    }
+
+
 TOOLS = {
     "get_stage_info": _impl_get_stage_info,
     "query_stage": _impl_query_stage,
@@ -327,6 +475,7 @@ TOOLS = {
     "set_transform": _impl_set_transform,
     "save_stage": _impl_save_stage,
     "search_assets": _impl_search_assets,
+    "capture_viewport": _impl_capture_viewport,
 }
 
 
