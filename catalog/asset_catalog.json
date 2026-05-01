@@ -1,0 +1,106 @@
+{
+  "version": "1",
+  "_meta": {
+    "comment": "Curated NVIDIA OpenUSD CDN URLs that the agent can pick from when authoring scenes. Feed entries' `url` straight to `add_reference_to_stage`. `verified: true` means the URL was confirmed to fetch successfully against this image; `verified: false` is a best-guess path based on Isaac Sim 5.1's standard asset layout — flip to true after a successful test, or replace if it 404s.",
+    "base_pattern": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/<category>/...",
+    "hosted_alternative": "USD Search at build.nvidia.com/nvidia/usdsearch — preferred once accessible; this catalog is the offline fallback."
+  },
+  "assets": [
+    {
+      "name": "UR10e",
+      "description": "Universal Robots UR10e — 6-DOF arm, 1300mm reach, 12.5kg payload. 7 PhysicsRevoluteJoints (shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3, ee).",
+      "category": "robot/manipulator",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/UniversalRobots/ur10e/ur10e.usd",
+      "tags": ["robot", "arm", "ur", "ur10e", "manipulator", "6dof", "universal_robots"],
+      "verified": true
+    },
+    {
+      "name": "UR5e",
+      "description": "Universal Robots UR5e — 6-DOF arm, 850mm reach, 5kg payload.",
+      "category": "robot/manipulator",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/UniversalRobots/ur5e/ur5e.usd",
+      "tags": ["robot", "arm", "ur", "ur5e", "manipulator", "6dof", "universal_robots"],
+      "verified": false
+    },
+    {
+      "name": "UR3e",
+      "description": "Universal Robots UR3e — 6-DOF arm, 500mm reach, 3kg payload.",
+      "category": "robot/manipulator",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/UniversalRobots/ur3e/ur3e.usd",
+      "tags": ["robot", "arm", "ur", "ur3e", "manipulator", "6dof", "universal_robots"],
+      "verified": false
+    },
+    {
+      "name": "Franka Panda",
+      "description": "Franka Emika Panda — 7-DOF arm with two-finger parallel gripper.",
+      "category": "robot/manipulator",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/Franka/franka.usd",
+      "tags": ["robot", "arm", "franka", "panda", "manipulator", "7dof"],
+      "verified": false
+    },
+    {
+      "name": "Franka with alt fingers",
+      "description": "Franka Panda variant with alternate (longer) gripper fingers.",
+      "category": "robot/manipulator",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/Franka/franka_alt_fingers.usd",
+      "tags": ["robot", "arm", "franka", "panda", "manipulator", "7dof"],
+      "verified": false
+    },
+    {
+      "name": "Boston Dynamics Spot",
+      "description": "Boston Dynamics Spot quadruped robot.",
+      "category": "robot/quadruped",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/BostonDynamics/spot/spot.usd",
+      "tags": ["robot", "quadruped", "spot", "boston_dynamics", "mobile"],
+      "verified": false
+    },
+    {
+      "name": "Robotiq 2F-85",
+      "description": "Robotiq 2F-85 parallel two-finger gripper, 85mm stroke.",
+      "category": "robot/gripper",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/Robotiq/2F-85/Robotiq_2F_85.usd",
+      "tags": ["gripper", "robotiq", "2f-85", "parallel", "two-finger"],
+      "verified": false
+    },
+    {
+      "name": "Robotiq 2F-140",
+      "description": "Robotiq 2F-140 parallel two-finger gripper, 140mm stroke.",
+      "category": "robot/gripper",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/Robotiq/2F-140/Robotiq_2F_140.usd",
+      "tags": ["gripper", "robotiq", "2f-140", "parallel", "two-finger"],
+      "verified": false
+    },
+    {
+      "name": "Cardboard Box",
+      "description": "Generic cardboard shipping box prop.",
+      "category": "prop/container",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Props/Cardboard_Box/cardboard_box.usd",
+      "tags": ["prop", "box", "cardboard", "container", "package"],
+      "verified": false
+    },
+    {
+      "name": "KLT Bin (small)",
+      "description": "Small KLT (Kleinladungsträger) plastic bin, common in industrial picking demos.",
+      "category": "prop/container",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Props/KLT_Bin/small_KLT.usd",
+      "tags": ["prop", "bin", "klt", "container", "industrial"],
+      "verified": false
+    },
+    {
+      "name": "Simple Warehouse",
+      "description": "Industrial warehouse environment with shelving and walls. Use as a stage backdrop.",
+      "category": "environment",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/warehouse.usd",
+      "tags": ["environment", "warehouse", "industrial", "scene"],
+      "verified": false
+    },
+    {
+      "name": "Simple Room",
+      "description": "Indoor room environment with walls, floor, ceiling, and basic lighting.",
+      "category": "environment",
+      "url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Room/simple_room.usd",
+      "tags": ["environment", "room", "indoor", "scene"],
+      "verified": false
+    }
+  ]
+}

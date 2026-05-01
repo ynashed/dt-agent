@@ -29,6 +29,7 @@ services:
       # Code mounted read-only — edit on host, restart container to pick up changes.
       - ./src:/workspace/dt-agent/src:ro
       - ./scripts:/workspace/dt-agent/scripts:ro
+      - ./catalog:/workspace/dt-agent/catalog:ro
       # Kit / Omniverse caches — named volumes so they survive container recreation.
       # First boot will be slow (~minutes); subsequent boots fast.
       - dt-agent-kit-cache:/isaac-sim/kit/cache

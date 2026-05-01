@@ -81,15 +81,22 @@ def main() -> int:
         saved = _rpc("save_stage", file_path=SAVE_PATH)
         print(f"[smoke] save_stage: {saved}")
 
-        # 7. Asset search probe
-        assets = _rpc("search_assets", query="franka", limit=5)
+        # 7. Asset search probe — exercises both catalog and filesystem sources
+        assets = _rpc("search_assets", query="ur10", limit=10)
         print(
-            f"[smoke] search_assets(query='franka'): "
+            f"[smoke] search_assets(query='ur10'): "
             f"{len(assets['matches'])} matches "
             f"(truncated={assets['truncated']})"
         )
         for m in assets["matches"][:5]:
-            print(f"          {m}")
+            src = m.get("source", "?")
+            label = m.get("name") or m["path"]
+            verified = ""
+            if src == "catalog":
+                verified = " [verified]" if m.get("verified") else " [unverified]"
+            print(f"          [{src}]{verified} {label}")
+            if m.get("name") and m.get("path") != m.get("name"):
+                print(f"             {m['path']}")
 
         return 0
 

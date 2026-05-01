@@ -213,8 +213,8 @@ def _impl_save_stage(file_path: str) -> dict:
 
 
 # Default search roots for shipped content inside the Isaac Sim 5.1 image.
-# Most "official" robot/prop USDs stream from Nucleus, but extensions and
-# their `data/` dirs hold useful demo assets that work offline.
+# Most "official" robot/prop USDs stream from Nucleus or the OpenUSD CDN, but
+# extensions and their `data/` dirs hold useful demo assets that work offline.
 _DEFAULT_ASSET_ROOTS = [
     "/isaac-sim/exts",
     "/isaac-sim/extscache",
@@ -222,30 +222,100 @@ _DEFAULT_ASSET_ROOTS = [
 ]
 _USD_EXTS = (".usd", ".usda", ".usdc", ".usdz")
 
+# Curated catalog of HTTPS URLs on NVIDIA's OpenUSD CDN. Loaded once at
+# startup; entries get returned alongside filesystem matches by search_assets.
+_CATALOG_PATH = "/workspace/dt-agent/catalog/asset_catalog.json"
+
+
+def _load_catalog() -> dict:
+    try:
+        with open(_CATALOG_PATH) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"assets": []}
+    except Exception as e:
+        print(
+            f"[sim_server] WARN: failed to load catalog at {_CATALOG_PATH}: "
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+        return {"assets": []}
+
+
+_CATALOG = _load_catalog()
+
+
+def _catalog_haystack(entry: dict) -> str:
+    return " ".join(
+        [
+            entry.get("name", ""),
+            entry.get("description", ""),
+            entry.get("category", ""),
+            " ".join(entry.get("tags", [])),
+            entry.get("url", ""),
+        ]
+    ).lower()
+
 
 def _impl_search_assets(
     query: str,
     limit: int = 30,
     roots: list | None = None,
+    sources: list | None = None,
 ) -> dict:
-    """Case-insensitive substring search for USD files whose path contains
-    `query`. Walks `roots` (defaults to a curated set of in-image dirs).
-    Returns up to `limit` matches with a `truncated` flag."""
-    roots = roots or _DEFAULT_ASSET_ROOTS
-    q = query.lower()
-    matches: list[str] = []
-    for root in roots:
-        if not os.path.isdir(root):
-            continue
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for fn in filenames:
-                if not fn.lower().endswith(_USD_EXTS):
-                    continue
-                full = os.path.join(dirpath, fn)
-                if q in full.lower():
-                    matches.append(full)
+    """Case-insensitive substring search for USDs across the curated catalog
+    and the local filesystem. Returns merged matches as objects.
+
+    Args:
+        query: substring to match (case-insensitive). Empty string returns
+               everything up to `limit`.
+        limit: total cap on matches across both sources.
+        roots: filesystem roots to walk. Defaults to a curated set of in-image
+               dirs plus /workspace/dt-agent/assets.
+        sources: subset of {"catalog", "filesystem"} to search; both by default.
+
+    Returns: {"matches": [{path, source, ...}], "truncated": bool}
+        - source="catalog" entries also include name, description, category,
+          and verified flag from the catalog file.
+        - source="filesystem" entries are minimal: just {path, source}.
+    """
+    sources = sources or ["catalog", "filesystem"]
+    q = (query or "").lower()
+    matches: list[dict] = []
+
+    if "catalog" in sources:
+        for entry in _CATALOG.get("assets", []):
+            if q and q not in _catalog_haystack(entry):
+                continue
+            matches.append(
+                {
+                    "path": entry.get("url", ""),
+                    "source": "catalog",
+                    "name": entry.get("name"),
+                    "description": entry.get("description"),
+                    "category": entry.get("category"),
+                    "verified": entry.get("verified", False),
+                }
+            )
+            if len(matches) >= limit:
+                return {"matches": matches, "truncated": True}
+
+    if "filesystem" in sources:
+        roots = roots or _DEFAULT_ASSET_ROOTS
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            for dirpath, _dirnames, filenames in os.walk(root):
+                for fn in filenames:
+                    if not fn.lower().endswith(_USD_EXTS):
+                        continue
+                    full = os.path.join(dirpath, fn)
+                    if q and q not in full.lower():
+                        continue
+                    matches.append({"path": full, "source": "filesystem"})
                     if len(matches) >= limit:
                         return {"matches": matches, "truncated": True}
+
     return {"matches": matches, "truncated": False}
 
 
@@ -324,6 +394,11 @@ print(
     flush=True,
 )
 print(f"[sim_server] tools: {sorted(TOOLS.keys())}", flush=True)
+print(
+    f"[sim_server] catalog: {len(_CATALOG.get('assets', []))} entries "
+    f"loaded from {_CATALOG_PATH}",
+    flush=True,
+)
 
 try:
     while sim_app.is_running():

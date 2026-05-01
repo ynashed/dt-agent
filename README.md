@@ -12,7 +12,7 @@ execute → observe (VLM) → reflect**.
 |---|---|
 | Coder/Planner LLM | GPT-5.3-codex via NV inference proxy (Responses API) |
 | VLM | Cosmos Reason via build.nvidia.com *(planned)* |
-| Sim runtime | `nvcr.io/nvidia/isaac-sim:5.1.0`, exposed via FastMCP over SSE *(planned)* |
+| Sim runtime | `nvcr.io/nvidia/isaac-sim:5.1.0`, exposed via stdlib HTTP RPC on `:8765` |
 | Framework | NeMo Agent Toolkit (NAT) *(planned)* |
 | Deployment target | Astra *(post-PoC)* |
 
@@ -50,8 +50,24 @@ python scripts/sim_client_smoke.py
 Expected: the smoke client lists the tool surface, then walks
 `create_primitive` → `set_transform` → `query_stage` → `save_stage` against
 a sphere at `/World/dt_agent_smoke_sphere`, finishing with a probe of
-`search_assets` against the in-image asset roots. Each step prints the
+`search_assets` (catalog + filesystem). Each step prints the
 `{result: ...}` returned by Kit.
+
+Add `--probe-s3` to additionally verify Kit's URL resolver can fetch USDs
+from NVIDIA's OpenUSD CDN over HTTPS — required if you want to use the
+catalog's S3 URLs.
+
+**Scripted workcell demo (no LLM yet):**
+
+```bash
+python scripts/build_workcell.py
+```
+
+Composes a benchtop workcell — table (Cube primitive), UR10e arm
+(USD reference from the CDN), conveyor (Cube primitive), three microplate
+stand-ins (Cube primitives) — and saves to
+`/workspace/dt-agent/output/workcell.usda` inside the container. Proves the
+RPC tool surface composes into a real scene before the LLM is in the loop.
 
 ## RPC contract
 
@@ -75,21 +91,31 @@ Phase 1 tool surface:
 | `add_reference_to_stage` | `usd_path, prim_path` | `{ok, prim_path, usd_path}` |
 | `set_transform` | `prim_path, translate?, rotate?, scale?` | `{ok, prim_path}` |
 | `save_stage` | `file_path` | `{ok, file_path}` |
-| `search_assets` | `query, limit=30, roots?` | `{matches, truncated}` |
+| `search_assets` | `query, limit=30, roots?, sources?` | `{matches: [{path, source, name?, description?, category?, verified?}], truncated}` |
+
+`search_assets` queries two sources by default — the curated catalog at
+`catalog/asset_catalog.json` (HTTPS URLs on NVIDIA's OpenUSD CDN) and the
+local filesystem under `_DEFAULT_ASSET_ROOTS`. Pass `sources=["catalog"]`
+or `sources=["filesystem"]` to restrict. Catalog matches include `name`,
+`description`, `category`, and a `verified` flag indicating whether the
+URL was confirmed to fetch successfully against this image.
 
 ## Layout
 
 ```
 dt-agent/
 ├── Dockerfile.isaacsim          # nvcr.io/nvidia/isaac-sim:5.1.0 (vanilla; root user)
-├── docker-compose.yml           # GPU passthrough, port 8765, cache volumes
+├── docker-compose.yml           # GPU passthrough, port 8765, cache + code mounts
 ├── hello_inference.py           # Phase 0 LLM-proxy validator
 ├── pyproject.toml
+├── catalog/
+│   └── asset_catalog.json       # Curated NVIDIA OpenUSD CDN URLs
 ├── src/dt_agent/
 │   ├── __init__.py
 │   └── sim_server.py            # Runs in container: Kit + stdlib HTTP RPC (threaded)
 └── scripts/
-    └── sim_client_smoke.py      # Runs on host: validates the RPC pipe
+    ├── sim_client_smoke.py      # Runs on host: validates the RPC pipe (--probe-s3 optional)
+    └── build_workcell.py        # Runs on host: composes a benchtop workcell scene
 ```
 
 ## Status
@@ -100,5 +126,7 @@ HTTP RPC pipe smoke-tested end-to-end.
 **Phase 1 — open-loop authoring (in progress):** tool surface for stage
 inspection and edit landed (`query_stage`, `create_primitive`,
 `add_reference_to_stage`, `set_transform`, `save_stage`, `search_assets`).
-Next: scripted demo flow exercising the tools to compose a workcell scene
-without an LLM in the loop, then layer the agent in Phase 2.
+Curated asset catalog on top of NVIDIA's OpenUSD CDN, with HTTPS fetch
+inside the container confirmed working. Scripted workcell demo composes a
+table + UR10e + conveyor + microplates without an LLM. Next: layer the
+agent in Phase 2.
