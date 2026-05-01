@@ -16,6 +16,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
+import sys
 from pathlib import Path
 
 from openai import OpenAI
@@ -84,10 +86,20 @@ def _data_uri(path: str | Path) -> str:
     return f"data:image/{suffix};base64,{b64}"
 
 
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
+_MISSING_COMMA = re.compile(r'("\s*)\n(\s*)(?=")')
+
+
 def _strip_fences(text: str) -> str:
-    """Defensive: if the model wrapped its JSON in ```json ... ``` despite
-    being told not to, strip the fences before parsing."""
+    """Defensive cleanup of the model's response before json.loads.
+
+    Handles two things despite the system prompt telling the model not to:
+      1. ```json ... ``` markdown fences (sometimes added by chat models).
+      2. <think>...</think> reasoning blocks (Cosmos Reason can emit
+         chain-of-thought before the JSON if reasoning mode is on).
+    """
     text = text.strip()
+    text = _THINK_BLOCK.sub("", text).strip()
     if not text.startswith("```"):
         return text
     lines = text.splitlines()
@@ -96,6 +108,15 @@ def _strip_fences(text: str) -> str:
     if lines and lines[-1].strip().startswith("```"):
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def _try_repair_json(text: str) -> str | None:
+    """Minimal fixup for the most common LLM JSON-emission bug: a missing
+    comma between two adjacent string-keyed properties (the model emits
+    `"value"\\n  "next_key":` instead of `"value",\\n  "next_key":`).
+    Returns None if no repair was applied."""
+    repaired = _MISSING_COMMA.sub(r'\1,\n\2', text)
+    return repaired if repaired != text else None
 
 
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "://vlm:", "://vlm/")
@@ -152,15 +173,35 @@ def observe(
         ],
         max_tokens=max_tokens,
         temperature=0.0,
+        # vLLM's xgrammar-backed structured output forces the model to
+        # emit valid JSON — fixes the common "missing comma between
+        # properties" bug we saw without this. Some non-vLLM proxies
+        # ignore this param silently; the repair fallback below catches
+        # those cases.
+        response_format={"type": "json_object"},
     )
 
     raw = (response.choices[0].message.content or "").strip()
     cleaned = _strip_fences(raw)
     try:
         data = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"VLM response was not valid JSON ({e}). "
-            f"First 500 chars of response: {cleaned[:500]!r}"
-        ) from e
+    except json.JSONDecodeError as primary_err:
+        repaired = _try_repair_json(cleaned)
+        if repaired is None:
+            raise RuntimeError(
+                f"VLM response was not valid JSON ({primary_err}). "
+                f"First 500 chars of response: {cleaned[:500]!r}"
+            ) from primary_err
+        try:
+            data = json.loads(repaired)
+            print(
+                f"[vlm] WARN: repaired malformed JSON from VLM ({primary_err})",
+                file=sys.stderr,
+            )
+        except json.JSONDecodeError as repair_err:
+            raise RuntimeError(
+                f"VLM response was not valid JSON, and the repair attempt also "
+                f"failed ({repair_err}). First 500 chars of original response: "
+                f"{cleaned[:500]!r}"
+            ) from repair_err
     return Observation.model_validate(data)
