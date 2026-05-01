@@ -30,6 +30,9 @@ services:
       - ./src:/workspace/dt-agent/src:ro
       - ./scripts:/workspace/dt-agent/scripts:ro
       - ./catalog:/workspace/dt-agent/catalog:ro
+      # Output mounted read-write so saved USDs appear on the host for
+      # GUI inspection in Isaac Sim / USD Composer.
+      - ./output:/workspace/dt-agent/output:rw
       # Kit / Omniverse caches — named volumes so they survive container recreation.
       # First boot will be slow (~minutes); subsequent boots fast.
       - dt-agent-kit-cache:/isaac-sim/kit/cache

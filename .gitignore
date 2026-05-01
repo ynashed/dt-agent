@@ -22,5 +22,5 @@ dist/
 Thumbs.db
 
 # Project
-output/
+output/        # docker-compose mounts ./output into the container for saved USDs
 *.usd.bak
