@@ -46,7 +46,7 @@ import time  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 
 import omni.usd  # noqa: E402  (import after SimulationApp is intentional)
-from pxr import Gf, Usd, UsdGeom  # noqa: E402
+from pxr import Gf, Usd, UsdGeom, UsdLux  # noqa: E402
 
 
 # --- Thread-safe job queue (HTTP threads -> Kit main thread) ---
@@ -330,6 +330,7 @@ def _impl_search_assets(
 # resources.
 
 DEFAULT_OBSERVATION_CAMERA = "/World/_dt_observation_cam"
+DEFAULT_OBSERVATION_LIGHT = "/World/_dt_observation_light"
 # Default 3/4 view of the workcell-shaped neighborhood near origin. Eye and
 # target are overridable per call via kwargs, but for the fixed-pose mode
 # the agent is expected to hit these defaults so the same view repeats.
@@ -380,6 +381,21 @@ def _ensure_observation_camera(camera_path: str, eye, target) -> None:
     xform.AddTransformOp().Set(_look_at_matrix(eye, target))
 
 
+def _ensure_default_lighting(light_path: str = DEFAULT_OBSERVATION_LIGHT) -> None:
+    """Create a DomeLight at `light_path` if missing. Without lights, the
+    bare default stage + our Cube primitives render as a uniform near-black
+    buffer, which looks identical to a render that didn't complete.
+    Idempotent — won't touch an existing light."""
+    stage = _stage()
+    if stage is None:
+        raise RuntimeError("no stage loaded")
+    if stage.GetPrimAtPath(light_path).IsValid():
+        return
+    dome = UsdLux.DomeLight.Define(stage, light_path)
+    dome.CreateIntensityAttr(1500.0)
+    dome.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
+
+
 def _impl_capture_viewport(
     camera_path: str | None = None,
     eye: list | None = None,
@@ -415,6 +431,11 @@ def _impl_capture_viewport(
         if not prim.IsValid():
             return {"error": f"camera prim not found: {cam_path}"}
 
+    # Make sure something illuminates the scene. The default Isaac Sim stage
+    # ships without a light; without one, captures of our Cube-primitive
+    # workcell are uniformly near-black.
+    _ensure_default_lighting()
+
     # (Re)build the render product if camera or resolution changed.
     if (
         _capture_state["camera_path"] != cam_path
@@ -427,17 +448,30 @@ def _impl_capture_viewport(
         _capture_state["camera_path"] = cam_path
         _capture_state["resolution"] = res
 
-    # Step a few frames so textures, lighting, and any pending USD edits
-    # land before we sample the render buffer.
-    for _ in range(3):
+    # rep.orchestrator.step() returns before the render fully lands, so we
+    # bracket it with extra Kit updates to let textures, materials, lights,
+    # and HTTPS-streamed asset references finish committing to the buffer.
+    for _ in range(5):
         sim_app.update()
     rep.orchestrator.step()
-    for _ in range(2):
+    for _ in range(15):
         sim_app.update()
 
     data = _capture_state["annotator"].get_data()
     if data is None or getattr(data, "size", 0) == 0:
         return {"error": "annotator returned empty data; render may not have completed"}
+
+    # Diagnostic — without this, "blank" results are indistinguishable from
+    # "no lighting", "empty stage", "wrong AOV", or "render not ready".
+    try:
+        print(
+            f"[sim_server] capture stats: shape={tuple(data.shape)} "
+            f"dtype={data.dtype} min={int(data.min())} max={int(data.max())} "
+            f"mean={float(data.mean()):.2f}",
+            flush=True,
+        )
+    except Exception:
+        pass
 
     if file_path is None:
         os.makedirs(CAPTURE_OUTPUT_DIR, exist_ok=True)
@@ -464,6 +498,11 @@ def _impl_capture_viewport(
         "camera_path": cam_path,
         "resolution": [int(res[0]), int(res[1])],
         "size": [int(data.shape[1]), int(data.shape[0])],
+        "stats": {
+            "min": int(data.min()),
+            "max": int(data.max()),
+            "mean": round(float(data.mean()), 2),
+        },
     }
 
 
