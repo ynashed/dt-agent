@@ -101,12 +101,20 @@ python scripts/observe_capture.py output/captures/capture_<latest>.png \
 Sends the PNG to the local Cosmos Reason 2 8B NIM at
 `http://localhost:8000` (default in `.env.example`) and prints a structured
 `Observation` JSON: `{intent_satisfied, observed, issues, correction_hint}`.
-That `correction_hint` is what the agent loop in Phase 2.5 will feed back
-to the LLM as the "what to fix next" signal.
 
-To use the NVIDIA-hosted variant on `integrate.api.nvidia.com` instead,
-unset `NV_VLM_BASE_URL` and supply `NV_VLM_API_KEY` from the build.nvidia.com
-panel (see `.env.example`).
+**Agent loop (Phase 2.5):**
+
+```bash
+python scripts/run_agent.py \
+    "Build a benchtop workcell at the origin: a 1m square table with a UR10e on top, a conveyor 1.2m to the right, and three microplates stacked on the conveyor. Save to /workspace/dt-agent/output/agent_workcell.usda."
+```
+
+GPT-5.3-codex on `inference-api.nvidia.com` drives a tool-calling loop
+against the same RPC surface plus a composite `observe(intent)` tool that
+captures + sends to the VLM. Each iteration is logged to
+`output/agent_traces/trace_<ts>.jsonl` for replay. Stops when the model
+returns text without tool calls (it's done) or after `--max-iter`
+iterations.
 
 ## RPC contract
 
@@ -161,11 +169,13 @@ dt-agent/
 ├── src/dt_agent/
 │   ├── __init__.py
 │   ├── sim_server.py            # Runs in container: Kit + stdlib HTTP RPC (threaded)
-│   └── vlm.py                   # Runs on host: Cosmos Reason wrapper -> Observation
+│   ├── vlm.py                   # Runs on host: Cosmos Reason wrapper -> Observation
+│   └── agent.py                 # Runs on host: GPT-5.3-codex loop with tool calling
 └── scripts/
     ├── sim_client_smoke.py      # Runs on host: validates the RPC pipe (--probe-s3 optional)
     ├── build_workcell.py        # Runs on host: composes a benchtop workcell scene
-    └── observe_capture.py       # Runs on host: VLM observation of a captured PNG
+    ├── observe_capture.py       # Runs on host: VLM observation of a captured PNG
+    └── run_agent.py             # Runs on host: end-to-end agent loop CLI
 ```
 
 ## Status
@@ -183,12 +193,13 @@ in Isaac Sim GUI on the host.
 **Phase 1.5 — viewport capture (done):** `capture_viewport` RPC renders a
 fixed-pose observation camera to PNG. Saves to `./output/captures/`.
 
-**Phase 2.0 — VLM observation (in progress):** `dt_agent.vlm.observe(image, intent)`
-sends a captured frame to **Cosmos Reason 2 8B** at
-`integrate.api.nvidia.com` and returns a Pydantic-validated `Observation`
+**Phase 2.0 — VLM observation (done):** `dt_agent.vlm.observe(image, intent)`
+sends a captured frame to **Cosmos Reason 2 8B** (default: local NIM at
+`localhost:8000`) and returns a Pydantic-validated `Observation`
 (intent_satisfied, observed, issues, correction_hint). Standalone CLI:
 `scripts/observe_capture.py`.
 
-**Phase 2.5 — agent loop:** wire GPT-5.3-codex + the RPC tools + the VLM
-observer into a plan→edit→capture→observe→reflect loop. NAT graph or
-thin custom orchestration — TBD.
+**Phase 2.5 — agent loop (in progress):** GPT-5.3-codex via Responses API
+drives a tool-calling loop. Tools: all the sim_server RPCs +
+`observe(intent)`. Server-side state via `previous_response_id`; trace log
+per run. CLI: `scripts/run_agent.py "<goal>"`.
