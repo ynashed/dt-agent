@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 # Make `src/` importable when running as a one-off script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from dt_agent.vlm import observe  # noqa: E402
+from dt_agent.vlm import VLM_BASE_URL, VLM_MODEL, observe  # noqa: E402
 
 
 def main() -> int:
@@ -40,6 +40,13 @@ def main() -> int:
     args = parser.parse_args()
 
     load_dotenv()
+
+    # Re-read after dotenv loaded — the module-level constants captured the
+    # values at import time, before .env was on the env.
+    import os
+    base_url = os.environ.get("NV_VLM_BASE_URL", VLM_BASE_URL)
+    model = os.environ.get("NV_VLM_MODEL", VLM_MODEL)
+    print(f"[observe] target: {base_url}  model={model}", file=sys.stderr)
 
     try:
         obs = observe(args.image, args.intent)

@@ -21,9 +21,11 @@ from pathlib import Path
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-VLM_BASE_URL = os.environ.get(
-    "NV_VLM_BASE_URL", "https://integrate.api.nvidia.com/v1"
-)
+# Default to the local NIM at http://localhost:8000/v1 — matches the
+# `vlm` service in docker-compose.yml. Override via NV_VLM_BASE_URL to
+# point at the NVIDIA-hosted endpoint (https://integrate.api.nvidia.com/v1)
+# or any other OpenAI-compat proxy.
+VLM_BASE_URL = os.environ.get("NV_VLM_BASE_URL", "http://localhost:8000/v1")
 VLM_MODEL = os.environ.get("NV_VLM_MODEL", "nvidia/cosmos-reason2-8b")
 
 
