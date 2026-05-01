@@ -64,11 +64,12 @@ def main() -> int:
         created = _rpc("create_primitive", prim_path=TEST_PRIM, prim_type="Sphere")
         print(f"[smoke] create_primitive: {created}")
 
-        # 4. Move it somewhere visible
+        # 4. Move it somewhere visible to the default observation camera
+        # (centered around the workcell origin at ~(0.6, 0, 0.45)).
         moved = _rpc(
             "set_transform",
             prim_path=TEST_PRIM,
-            translate=[1.0, 2.0, 0.5],
+            translate=[0.0, 0.5, 0.5],
             scale=[0.25, 0.25, 0.25],
         )
         print(f"[smoke] set_transform: {moved}")

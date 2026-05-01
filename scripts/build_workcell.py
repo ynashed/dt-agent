@@ -113,6 +113,12 @@ def build() -> int:
     # 6. Save
     saved = _rpc("save_stage", file_path=SAVE_PATH)
     print(f"\n[workcell] saved: {saved}")
+
+    # 7. Capture from the default observation camera so you can eyeball the
+    # layout without round-tripping through Isaac Sim GUI on the host.
+    cap = _rpc("capture_viewport")
+    print(f"[workcell] capture: {cap}")
+
     return 0
 
 
