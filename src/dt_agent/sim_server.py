@@ -336,6 +336,11 @@ DEFAULT_OBSERVATION_LIGHT = "/World/_dt_observation_light"
 # the agent is expected to hit these defaults so the same view repeats.
 DEFAULT_CAMERA_EYE = (3.0, 3.0, 2.0)
 DEFAULT_CAMERA_TARGET = (0.6, 0.0, 0.45)
+# 18mm gives ~60° horizontal FOV on the default 21mm aperture — wide enough
+# to comfortably frame the workcell from (3,3,2). 24mm (~47°) cropped the
+# smoke sphere at (1,2,0.5).
+DEFAULT_FOCAL_LENGTH_MM = 18.0
+DEFAULT_DOME_INTENSITY = 300.0
 DEFAULT_RESOLUTION = (1280, 720)
 CAPTURE_OUTPUT_DIR = "/workspace/dt-agent/output/captures"
 
@@ -365,36 +370,38 @@ def _look_at_matrix(eye, target, up=(0.0, 0.0, 1.0)) -> "Gf.Matrix4d":
 
 
 def _ensure_observation_camera(camera_path: str, eye, target) -> None:
-    """Create the camera prim if missing, then (re)set its transform to a
-    look-at pose. Idempotent; safe to call every capture."""
+    """Create the camera prim if missing, then (re)set its transform AND
+    intrinsics on every call. Refreshing on every capture means tweaks to
+    DEFAULT_FOCAL_LENGTH_MM take effect after a `docker compose restart`
+    with no manual prim cleanup."""
     stage = _stage()
     if stage is None:
         raise RuntimeError("no stage loaded")
-    prim = stage.GetPrimAtPath(camera_path)
-    if not prim.IsValid():
-        cam = UsdGeom.Camera.Define(stage, camera_path)
-        cam.GetFocalLengthAttr().Set(24.0)
-        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))
+    if not stage.GetPrimAtPath(camera_path).IsValid():
+        UsdGeom.Camera.Define(stage, camera_path)
     cam = UsdGeom.Camera(stage.GetPrimAtPath(camera_path))
+    cam.GetFocalLengthAttr().Set(DEFAULT_FOCAL_LENGTH_MM)
+    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 1000.0))
     xform = UsdGeom.Xformable(cam)
     xform.ClearXformOpOrder()
     xform.AddTransformOp().Set(_look_at_matrix(eye, target))
 
 
 def _ensure_default_lighting(light_path: str = DEFAULT_OBSERVATION_LIGHT) -> None:
-    """Create a DomeLight at `light_path` if missing. Without lights, the
-    bare default stage + our Cube primitives render as a uniform near-black
-    buffer, which looks identical to a render that didn't complete.
-    Idempotent — won't touch an existing light. Intensity 300 is a neutral
-    indoor baseline; higher saturates the RTX tone mapper to white."""
+    """Create a DomeLight at `light_path` if missing, then (re)set its
+    intensity and color on every call so tweaking DEFAULT_DOME_INTENSITY
+    takes effect after a `docker compose restart` with no manual prim
+    cleanup."""
     stage = _stage()
     if stage is None:
         raise RuntimeError("no stage loaded")
-    if stage.GetPrimAtPath(light_path).IsValid():
-        return
-    dome = UsdLux.DomeLight.Define(stage, light_path)
-    dome.CreateIntensityAttr(300.0)
-    dome.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
+    if not stage.GetPrimAtPath(light_path).IsValid():
+        UsdLux.DomeLight.Define(stage, light_path)
+    dome = UsdLux.DomeLight(stage.GetPrimAtPath(light_path))
+    intensity_attr = dome.GetIntensityAttr() or dome.CreateIntensityAttr()
+    intensity_attr.Set(DEFAULT_DOME_INTENSITY)
+    color_attr = dome.GetColorAttr() or dome.CreateColorAttr()
+    color_attr.Set(Gf.Vec3f(1.0, 1.0, 1.0))
 
 
 def _impl_capture_viewport(
