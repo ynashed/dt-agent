@@ -24,7 +24,11 @@ source .venv/bin/activate
 uv pip install -e .
 
 cp .env.example .env
-# Edit .env and set NV_API_KEY (get a key at https://build.nvidia.com)
+# Edit .env:
+#   NV_API_KEY      — for GPT-5.3-codex on inference-api.nvidia.com
+#   NV_VLM_API_KEY  — for Cosmos Reason 2 8B on build.nvidia.com (separate
+#                     auth surface; generate from the "Get API Key" panel at
+#                     https://build.nvidia.com/nvidia/cosmos-reason2-8b)
 ```
 
 ## Validate
