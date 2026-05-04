@@ -43,10 +43,7 @@ SIM_BASE_URL = os.environ.get("DT_AGENT_SIM_URL", "http://localhost:8765")
 
 USD_SEARCH_BASE_URL = "https://search.simready.omniverse.nvidia.com"
 # Default to Isaac 5.1 assets so results are compatible with the running container.
-USD_SEARCH_DEFAULT_PATH = (
-    "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
-    "/Assets/Isaac/5.1/"
-)
+USD_SEARCH_DEFAULT_PATH = None  # search all versions; 6.0 assets work in 5.1
 
 # Repo root, used to translate container-side capture paths to host paths
 # so the VLM wrapper (running on host) can read the PNG.
@@ -208,7 +205,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "search_path": {
                     "type": "string",
-                    "description": "Restrict search to a CDN path prefix. Defaults to the Isaac 5.1 CDN root. Pass null to search all versions.",
+                    "description": "Restrict search to a CDN path prefix. Leave unset to search all Isaac versions.",
                 },
             },
             "required": ["description"],
