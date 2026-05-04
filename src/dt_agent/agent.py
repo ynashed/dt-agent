@@ -511,6 +511,7 @@ def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
     # Maintain the full conversation history client-side and resend it as
     # `input` every turn. `instructions=` is re-sent every call too.
     history: list[dict[str, Any]] = [{"role": "user", "content": goal}]
+    save_stage_succeeded = False  # gate: don't exit until save_stage is confirmed
 
     for iteration in range(1, max_iterations + 1):
         if log:
@@ -545,6 +546,18 @@ def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
                 tool_calls.append(item)
 
         if not tool_calls:
+            if not save_stage_succeeded:
+                # Model is trying to finish without having saved. Re-prompt.
+                nudge = (
+                    "You declared the task done but save_stage was never "
+                    "successfully called — the output file has not been written. "
+                    "Call save_stage with the requested file path now."
+                )
+                history.append({"role": "user", "content": nudge})
+                if log:
+                    print("[agent]  NOTE: intercepted premature finish — save_stage not yet called", file=sys.stderr)
+                trace("save_nudge", iteration=iteration)
+                continue
             final_text = _extract_text(response) or "(no text returned)"
             if log:
                 print(f"\n[agent] DONE\n{final_text}", file=sys.stderr)
@@ -561,6 +574,12 @@ def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
                     args_repr = args_repr[:160] + "..."
                 print(f"[agent]   -> {call.name}({args_repr})", file=sys.stderr)
             output = _execute_tool(call.name, args)
+            if call.name == "save_stage":
+                try:
+                    if json.loads(output).get("ok"):
+                        save_stage_succeeded = True
+                except Exception:
+                    pass
             if log:
                 trim = output if len(output) <= 240 else output[:240] + "..."
                 print(f"[agent]      = {trim}", file=sys.stderr)
