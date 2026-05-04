@@ -340,36 +340,40 @@ def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
 
     trace("start", goal=goal, model=LLM_MODEL, sim=SIM_BASE_URL)
 
-    previous_response_id: str | None = None
-    next_input: Any = goal  # first turn: bare goal string
+    # NV-internal proxy rejects `previous_response_id` (Zero Data Retention).
+    # Maintain the full conversation history client-side and resend it as
+    # `input` every turn. `instructions=` is re-sent every call too.
+    history: list[dict[str, Any]] = [{"role": "user", "content": goal}]
 
     for iteration in range(1, max_iterations + 1):
         if log:
             print(f"\n[agent] -- iteration {iteration}/{max_iterations} --", file=sys.stderr)
 
-        kwargs: dict[str, Any] = {
-            "model": LLM_MODEL,
-            "tools": TOOL_DEFINITIONS,
-            "input": next_input,
-        }
-        if previous_response_id is None:
-            kwargs["instructions"] = SYSTEM_PROMPT
-        else:
-            kwargs["previous_response_id"] = previous_response_id
-
         try:
-            response = client.responses.create(**kwargs)
+            response = client.responses.create(
+                model=LLM_MODEL,
+                instructions=SYSTEM_PROMPT,
+                tools=TOOL_DEFINITIONS,
+                input=history,
+            )
         except Exception as e:
             trace("llm_error", iteration=iteration, error=str(e))
             print(f"[agent] LLM call failed: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
 
-        previous_response_id = response.id
         trace("llm_response", iteration=iteration, response_id=response.id)
 
-        # Walk the response output items: collect tool calls and any text.
+        # Echo every output item back into history so the next turn carries
+        # the full conversation. `model_dump()` on each item produces the
+        # right shape for the Responses API to accept as input.
         tool_calls = []
         for item in response.output or []:
+            try:
+                history.append(item.model_dump())
+            except Exception:
+                # If the item type isn't a Pydantic model for some reason,
+                # fall back to a best-effort dict so we don't break the loop.
+                history.append({"type": getattr(item, "type", "unknown")})
             if getattr(item, "type", None) == "function_call":
                 tool_calls.append(item)
 
@@ -381,8 +385,7 @@ def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
             print(final_text)
             return 0
 
-        # Execute each tool call and collect outputs for the next turn.
-        next_input = []
+        # Execute each tool call and append the outputs to history.
         for call in tool_calls:
             args = json.loads(call.arguments) if call.arguments else {}
             if log:
@@ -401,7 +404,7 @@ def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
                 args=args,
                 output=output,
             )
-            next_input.append(
+            history.append(
                 {
                     "type": "function_call_output",
                     "call_id": call.call_id,
