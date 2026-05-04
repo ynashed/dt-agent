@@ -38,7 +38,7 @@ from dt_agent.vlm import observe as vlm_observe
 LLM_BASE_URL = os.environ.get(
     "NV_LLM_BASE_URL", "https://inference-api.nvidia.com/v1"
 )
-LLM_MODEL = os.environ.get("NV_LLM_MODEL", "openai/openai/gpt-5.3-codex")
+LLM_MODEL = os.environ.get("NV_LLM_MODEL", "nvidia/nvidia/nemotron-3-super-120b-long-ctx")
 SIM_BASE_URL = os.environ.get("DT_AGENT_SIM_URL", "http://localhost:8765")
 
 USD_SEARCH_BASE_URL = "https://search.simready.omniverse.nvidia.com"
@@ -339,6 +339,12 @@ TOOL_DEFINITIONS: list[dict] = [
     },
 ]
 
+# Wrap into Chat Completions tool format: {type, function: {name, description, parameters}}
+TOOL_DEFINITIONS = [
+    {"type": "function", "function": {k: v for k, v in t.items() if k != "type"}}
+    for t in TOOL_DEFINITIONS
+]
+
 
 # ---------------------------------------------------------------------------
 # Tool executors
@@ -477,20 +483,10 @@ def _make_tracer(trace_path: Path):
 
 
 def _extract_text(response) -> str:
-    """Pull the message text out of a Responses API response. The SDK
-    provides `output_text` as a convenience but fall back to walking
-    output items if that isn't populated."""
-    text = getattr(response, "output_text", None)
-    if text:
-        return text
-    parts: list[str] = []
-    for item in getattr(response, "output", []) or []:
-        if getattr(item, "type", None) == "message":
-            for c in getattr(item, "content", []) or []:
-                t = getattr(c, "text", None) or (c.get("text") if isinstance(c, dict) else None)
-                if t:
-                    parts.append(t)
-    return "\n".join(parts)
+    """Pull the assistant's text content from a Chat Completions response."""
+    if response.choices:
+        return response.choices[0].message.content or ""
+    return ""
 
 
 def run_turn(
@@ -525,11 +521,11 @@ def run_turn(
             print(f"\n[agent] -- iteration {iteration}/{max_iterations} --", file=sys.stderr)
 
         try:
-            response = client.responses.create(
+            response = client.chat.completions.create(
                 model=LLM_MODEL,
-                instructions=SYSTEM_PROMPT,
+                messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
                 tools=TOOL_DEFINITIONS,
-                input=history,
+                temperature=0.2,
             )
         except Exception as e:
             trace("llm_error", iteration=iteration, error=str(e))
@@ -538,14 +534,21 @@ def run_turn(
 
         trace("llm_response", iteration=iteration, response_id=response.id)
 
-        tool_calls = []
-        for item in response.output or []:
-            try:
-                history.append(item.model_dump())
-            except Exception:
-                history.append({"type": getattr(item, "type", "unknown")})
-            if getattr(item, "type", None) == "function_call":
-                tool_calls.append(item)
+        msg = response.choices[0].message
+        tool_calls = msg.tool_calls or []
+
+        # Append assistant turn to history (include tool_calls array if present)
+        msg_dict: dict[str, Any] = {"role": "assistant", "content": msg.content}
+        if tool_calls:
+            msg_dict["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in tool_calls
+            ]
+        history.append(msg_dict)
 
         if not tool_calls:
             # Gate 1: require at least one observe() before finishing a build task.
@@ -591,12 +594,11 @@ def run_turn(
 
         stall_count = 0  # any tool call means the model is working
         for call in tool_calls:
-            args = json.loads(call.arguments) if call.arguments else {}
+            name = call.function.name
+            args = json.loads(call.function.arguments) if call.function.arguments else {}
 
             # Guard: block save_stage if the last observe() was not satisfied.
-            # This prevents the model from declaring done and saving despite a
-            # failed VLM check — a common instruction-following failure.
-            if call.name == "save_stage" and last_vlm_satisfied is False:
+            if name == "save_stage" and last_vlm_satisfied is False:
                 issues_str = "; ".join(last_vlm_issues) if last_vlm_issues else "see correction_hint"
                 blocked_output = json.dumps({
                     "error": (
@@ -613,18 +615,18 @@ def run_turn(
                         file=sys.stderr,
                     )
                 trace("save_blocked", iteration=iteration, issues=last_vlm_issues)
-                history.append({"type": "function_call_output", "call_id": call.call_id, "output": blocked_output})
+                history.append({"role": "tool", "tool_call_id": call.id, "content": blocked_output})
                 continue
 
             if log:
                 args_repr = json.dumps(args)
                 if len(args_repr) > 160:
                     args_repr = args_repr[:160] + "..."
-                print(f"[agent]   -> {call.name}({args_repr})", file=sys.stderr)
-            output = _execute_tool(call.name, args)
+                print(f"[agent]   -> {name}({args_repr})", file=sys.stderr)
+            output = _execute_tool(name, args)
 
             # Track observe() outcomes so the save guard stays current.
-            if call.name == "observe":
+            if name == "observe":
                 try:
                     obs = json.loads(output)
                     last_vlm_satisfied = bool(obs.get("intent_satisfied"))
@@ -632,7 +634,7 @@ def run_turn(
                 except Exception:
                     pass
 
-            if call.name == "save_stage":
+            if name == "save_stage":
                 try:
                     if json.loads(output).get("ok"):
                         save_stage_succeeded = True
@@ -642,8 +644,8 @@ def run_turn(
             if log:
                 trim = output if len(output) <= 240 else output[:240] + "..."
                 print(f"[agent]      = {trim}", file=sys.stderr)
-            trace("tool_call", iteration=iteration, name=call.name, args=args, output=output)
-            history.append({"type": "function_call_output", "call_id": call.call_id, "output": output})
+            trace("tool_call", iteration=iteration, name=name, args=args, output=output)
+            history.append({"role": "tool", "tool_call_id": call.id, "content": output})
 
     if log:
         print(f"\n[agent] hit iteration cap ({max_iterations}); stopping.", file=sys.stderr)
