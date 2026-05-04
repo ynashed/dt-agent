@@ -199,7 +199,18 @@ sends a captured frame to **Cosmos Reason 2 8B** (default: local NIM at
 (intent_satisfied, observed, issues, correction_hint). Standalone CLI:
 `scripts/observe_capture.py`.
 
-**Phase 2.5 — agent loop (in progress):** GPT-5.3-codex via Responses API
-drives a tool-calling loop. Tools: all the sim_server RPCs +
-`observe(intent)`. Server-side state via `previous_response_id`; trace log
-per run. CLI: `scripts/run_agent.py "<goal>"`.
+**Phase 2.5 — agent loop (done):** GPT-5.3-codex via Responses API drives a
+tool-calling loop. Tools: all the sim_server RPCs + composite
+`observe(intent)`. Stateless mode (the NV-internal proxy rejects
+`previous_response_id` due to Zero Data Retention) — full conversation
+history is maintained client-side and re-sent each turn. Trace log per run
+at `output/agent_traces/`. CLI: `scripts/run_agent.py "<goal>"`. The agent
+demonstrably cross-validates VLM observations against `query_stage` when
+the two disagree.
+
+**Phase 3 — polish (next):** Tighten the LLM's spatial precision (Cube
+default size = 2.0 trip-up costs the model on table thickness etc.).
+Add a `set_joint_positions` tool so robots render in a recognizable pose
+rather than the flat default. Optionally widen the VLM observation prompt
+to flag specific drift (e.g. "object floats above surface", "object
+penetrates surface").
