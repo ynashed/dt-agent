@@ -514,6 +514,36 @@ def _impl_capture_viewport(
     }
 
 
+def _impl_get_prim_bounds(prim_path: str) -> dict:
+    """Return the world-space axis-aligned bounding box (min, max, size) of a
+    prim. Use after add_reference_to_stage to measure a loaded asset's
+    dimensions before tiling it."""
+    stage = _stage()
+    if stage is None:
+        return {"error": "no stage loaded"}
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        return {"error": f"prim not found: {prim_path}"}
+    # Pump a few frames so recently-referenced assets have had time to resolve.
+    for _ in range(5):
+        sim_app.update()
+    cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render]
+    )
+    bound = cache.ComputeWorldBound(prim)
+    rng = bound.GetRange()
+    if rng.IsEmpty():
+        return {"error": f"empty bounding box for {prim_path} — asset may not have resolved yet"}
+    mn, mx = rng.GetMin(), rng.GetMax()
+    sz = mx - mn
+    return {
+        "prim_path": prim_path,
+        "min": [round(float(mn[i]), 4) for i in range(3)],
+        "max": [round(float(mx[i]), 4) for i in range(3)],
+        "size": [round(float(sz[i]), 4) for i in range(3)],
+    }
+
+
 _LIGHT_TYPE_MAP = {
     "SphereLight": UsdLux.SphereLight,
     "RectLight": UsdLux.RectLight,
@@ -575,6 +605,7 @@ TOOLS = {
     "search_assets": _impl_search_assets,
     "capture_viewport": _impl_capture_viewport,
     "add_light": _impl_add_light,
+    "get_prim_bounds": _impl_get_prim_bounds,
 }
 
 

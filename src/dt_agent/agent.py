@@ -58,11 +58,17 @@ tools to inspect, edit, and observe the scene to make it match the goal.
 Workflow:
 1. Survey: call `query_stage` to see what's already in the scene.
 2. Plan: identify the prims you need with their target paths and transforms.
-3. Build: use `create_primitive`, `add_reference_to_stage`, and `set_transform`
-   to compose the scene. Always call `search_assets_ai` first for any named
-   object (robot, conveyor, wall panel, floor tile, etc.) and use the returned
-   `url` directly with `add_reference_to_stage`. Only fall back to Cube/Sphere
-   primitives when search returns no usable results for that component.
+3. Build: use `create_primitive`, `add_reference_to_stage`, `set_transform`,
+   and `get_prim_bounds` to compose the scene.
+   - For every named component (robot, wall, floor, conveyor, etc.) call
+     `search_assets_ai` first. If it returns relevant results, you MUST use
+     `add_reference_to_stage` with one of those URLs — do NOT substitute
+     Cube/Sphere primitives.
+   - For modular/tiled assets (wall panels, floor tiles): load ONE instance,
+     call `get_prim_bounds` to measure it, calculate tile positions, then
+     tile with `add_reference_to_stage` + `set_transform`.
+   - Only use Cube/Sphere/Cylinder primitives for components where search
+     returned no usable asset.
 4. Validate: call `observe(intent)` after substantive edits. The vision model
    returns `{intent_satisfied, observed, issues, correction_hint}`. If the
    observation contradicts what `query_stage` reports, trust `query_stage` for
@@ -87,6 +93,10 @@ Conventions:
   blocked by walls and ceilings. For any enclosed space, use `add_light` to
   place SphereLight or RectLight prims inside (intensity 3000–10000 for
   warehouse scale). Place lights before the first `observe` call.
+- Camera for large scenes: the default eye (3,3,2) is designed for ~2m
+  workcells. For scenes >5m, pass eye and target to `observe`. A 20×40m
+  warehouse centred at the origin: eye=[-30,-30,20], target=[0,0,5].
+  Scale the distance proportionally for other sizes.
 - Do NOT declare the task done if `observe` returns an error or a black image.
   Diagnose and fix (add lights, reposition camera, fix geometry) then re-observe.
 
@@ -276,15 +286,41 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "type": "function",
+        "name": "get_prim_bounds",
+        "description": "Return the world-space axis-aligned bounding box (min, max, size in metres) of a prim. Use after add_reference_to_stage to measure a loaded asset before tiling it.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prim_path": {"type": "string"},
+            },
+            "required": ["prim_path"],
+        },
+    },
+    {
+        "type": "function",
         "name": "observe",
-        "description": "Render the scene from the fixed observation camera and ask the VLM whether the rendered frame matches `intent`. Returns {intent_satisfied, observed, issues, correction_hint}. Slower than RPC tools (~2-5s); call after substantive edits, not after every primitive.",
+        "description": "Render the scene and ask the VLM whether it matches `intent`. Returns {intent_satisfied, observed, issues, correction_hint}. Slower than RPC tools; call after substantive edits. For large scenes pass eye/target so the camera frames the whole scene.",
         "parameters": {
             "type": "object",
             "properties": {
                 "intent": {
                     "type": "string",
-                    "description": "What the scene should look like, in plain English. Mention specific component names from the goal (e.g. 'UR10e', 'conveyor', 'three microplates') so the VLM can match them.",
-                }
+                    "description": "What the scene should look like. Mention specific component names so the VLM can match them.",
+                },
+                "eye": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "description": "Camera eye position in metres (xyz). Default (3,3,2) suits ~2m scenes. For a 20×40m warehouse try (-30,-30,20).",
+                },
+                "target": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "description": "Camera look-at point in metres (xyz). Default (0.6,0,0.45). For a warehouse centred at origin try (0,0,5).",
+                },
             },
             "required": ["intent"],
         },
@@ -365,10 +401,20 @@ def _exec_search_assets_ai(
     return {"matches": matches, "count": len(matches)}
 
 
-def _exec_observe(intent: str) -> dict:
-    """Composite tool: capture from the default observation camera, then
-    send the resulting PNG to the VLM with the given intent."""
-    cap = _sim_rpc("capture_viewport")
+def _exec_observe(
+    intent: str,
+    eye: list | None = None,
+    target: list | None = None,
+) -> dict:
+    """Composite tool: capture from the observation camera, then send the
+    resulting PNG to the VLM with the given intent. Pass eye/target to
+    reposition the camera for large scenes."""
+    cap_args: dict[str, Any] = {}
+    if eye is not None:
+        cap_args["eye"] = eye
+    if target is not None:
+        cap_args["target"] = target
+    cap = _sim_rpc("capture_viewport", **cap_args)
     if not cap.get("ok"):
         return {"error": f"capture_viewport failed: {cap}"}
     container_path = cap["file_path"]
@@ -386,6 +432,7 @@ _TOOL_EXECUTORS = {
     "save_stage": lambda **kw: _sim_rpc("save_stage", **kw),
     "search_assets_ai": lambda **kw: _exec_search_assets_ai(**kw),
     "search_assets": lambda **kw: _sim_rpc("search_assets", **kw),
+    "get_prim_bounds": lambda **kw: _sim_rpc("get_prim_bounds", **kw),
     "add_light": lambda **kw: _sim_rpc("add_light", **kw),
     "observe": lambda **kw: _exec_observe(**kw),
 }
