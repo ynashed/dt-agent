@@ -103,6 +103,16 @@ Conventions:
   `intent_satisfied=false` — the framework will block it. Fix all listed
   issues, call `observe()` again, and only then save.
 
+Tool batching: always call independent tools in parallel within a single
+response — never wait for one result before issuing the next unrelated call.
+Examples of things that should be one response:
+- All `search_assets_ai` lookups for a scene (walls, floors, ceiling, etc.)
+- All `add_reference_to_stage` calls once you have the URLs
+- All `set_transform` calls once you know the positions
+- All `add_light` calls
+The only time you must wait is when a result feeds the next call
+(e.g. `get_prim_bounds` needs the prim to exist first).
+
 Conversational / follow-up turns:
 - When the user asks to "check", "look", or "see" what the scene looks like,
   call `observe` immediately — do not describe what you plan to do.
@@ -525,6 +535,7 @@ def run_turn(
                 model=LLM_MODEL,
                 messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
                 tools=TOOL_DEFINITIONS,
+                parallel_tool_calls=True,
                 temperature=0.2,
             )
         except Exception as e:
