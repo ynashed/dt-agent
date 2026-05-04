@@ -59,14 +59,17 @@ Workflow:
 1. Survey: call `query_stage` to see what's already in the scene.
 2. Plan: identify the prims you need with their target paths and transforms.
 3. Build: use `create_primitive`, `add_reference_to_stage`, and `set_transform`
-   to compose the scene. Use `search_assets_ai` to find NVIDIA library USDs by
-   natural language description (e.g. "UR10 robot arm", "conveyor belt",
-   "lab workbench") — pass the `url` field directly to `add_reference_to_stage`.
-   Fall back to `search_assets` only for locally mounted custom assets.
+   to compose the scene. Always call `search_assets_ai` first for any named
+   object (robot, conveyor, wall panel, floor tile, etc.) and use the returned
+   `url` directly with `add_reference_to_stage`. Only fall back to Cube/Sphere
+   primitives when search returns no usable results for that component.
 4. Validate: call `observe(intent)` after substantive edits. The vision model
    returns `{intent_satisfied, observed, issues, correction_hint}`. If the
    observation contradicts what `query_stage` reports, trust `query_stage` for
    ground truth — the VLM may misidentify visually ambiguous geometry.
+   A completely black or near-black image means no light reaches the camera —
+   do NOT save or declare done. For enclosed spaces add interior lights with
+   `add_light` before observing again.
 5. Iterate: when `intent_satisfied` is false, address the `issues` list one
    at a time. Re-observe between meaningful edits, not every primitive.
 6. Save: when satisfied, `save_stage` to the requested file path and reply
@@ -80,6 +83,12 @@ Conventions:
 - Transform args: translate (xyz meters), rotate (xyz Euler degrees), scale.
 - Save USDs to `/workspace/dt-agent/output/<name>.usda` so they appear on the
   host filesystem.
+- Interior lighting: the default DomeLight added by `capture_viewport` is
+  blocked by walls and ceilings. For any enclosed space, use `add_light` to
+  place SphereLight or RectLight prims inside (intensity 3000–10000 for
+  warehouse scale). Place lights before the first `observe` call.
+- Do NOT declare the task done if `observe` returns an error or a black image.
+  Diagnose and fix (add lights, reposition camera, fix geometry) then re-observe.
 
 Respond with tool calls until the goal is achieved. Only emit plain text
 (no tool calls) once you're done — that text is what gets returned to the
@@ -229,6 +238,44 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "type": "function",
+        "name": "add_light",
+        "description": "Create a USD light prim. Required for interior lighting in enclosed spaces (rooms, warehouses) — the default DomeLight is blocked by walls and ceilings. Use SphereLight for point/ceiling lights, RectLight for overhead panels, DiskLight for circular ceiling fixtures.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prim_path": {"type": "string"},
+                "light_type": {
+                    "type": "string",
+                    "enum": ["SphereLight", "RectLight", "DiskLight", "CylinderLight"],
+                    "description": "USD light type. Default SphereLight.",
+                },
+                "intensity": {
+                    "type": "number",
+                    "description": "Photometric intensity. 3000–10000 for warehouse-scale spaces. Default 3000.",
+                },
+                "translate": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "description": "Light position in metres (xyz).",
+                },
+                "color": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "description": "RGB color, each 0–1. Default white.",
+                },
+                "radius": {"type": "number", "description": "Radius in metres for SphereLight/DiskLight."},
+                "width": {"type": "number", "description": "Width in metres for RectLight."},
+                "height": {"type": "number", "description": "Height in metres for RectLight."},
+            },
+            "required": ["prim_path"],
+        },
+    },
+    {
+        "type": "function",
         "name": "observe",
         "description": "Render the scene from the fixed observation camera and ask the VLM whether the rendered frame matches `intent`. Returns {intent_satisfied, observed, issues, correction_hint}. Slower than RPC tools (~2-5s); call after substantive edits, not after every primitive.",
         "parameters": {
@@ -339,6 +386,7 @@ _TOOL_EXECUTORS = {
     "save_stage": lambda **kw: _sim_rpc("save_stage", **kw),
     "search_assets_ai": lambda **kw: _exec_search_assets_ai(**kw),
     "search_assets": lambda **kw: _sim_rpc("search_assets", **kw),
+    "add_light": lambda **kw: _sim_rpc("add_light", **kw),
     "observe": lambda **kw: _exec_observe(**kw),
 }
 

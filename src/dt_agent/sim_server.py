@@ -514,6 +514,57 @@ def _impl_capture_viewport(
     }
 
 
+_LIGHT_TYPE_MAP = {
+    "SphereLight": UsdLux.SphereLight,
+    "RectLight": UsdLux.RectLight,
+    "DiskLight": UsdLux.DiskLight,
+    "CylinderLight": UsdLux.CylinderLight,
+}
+
+
+def _impl_add_light(
+    prim_path: str,
+    light_type: str = "SphereLight",
+    intensity: float = 3000.0,
+    translate: list | None = None,
+    color: list | None = None,
+    radius: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+) -> dict:
+    """Create a USD light prim. Use for interior lighting in enclosed spaces
+    (rooms, warehouses) where the DomeLight from capture_viewport cannot
+    illuminate through walls/ceiling.
+
+    light_type: SphereLight | RectLight | DiskLight | CylinderLight
+    intensity:  photometric intensity. 3000–10000 for warehouse-scale spaces.
+    radius:     SphereLight/DiskLight radius in metres.
+    width/height: RectLight dimensions in metres.
+    """
+    stage = _stage()
+    if stage is None:
+        return {"error": "no stage loaded"}
+    if light_type not in _LIGHT_TYPE_MAP:
+        return {"error": f"unknown light_type '{light_type}'. Valid: {list(_LIGHT_TYPE_MAP)}"}
+    light = _LIGHT_TYPE_MAP[light_type].Define(stage, prim_path)
+    if not light:
+        return {"error": f"failed to create {light_type} at {prim_path}"}
+    light.CreateIntensityAttr().Set(float(intensity))
+    if color is not None:
+        light.CreateColorAttr().Set(Gf.Vec3f(float(color[0]), float(color[1]), float(color[2])))
+    if radius is not None and hasattr(light, "CreateRadiusAttr"):
+        light.CreateRadiusAttr().Set(float(radius))
+    if width is not None and hasattr(light, "CreateWidthAttr"):
+        light.CreateWidthAttr().Set(float(width))
+    if height is not None and hasattr(light, "CreateHeightAttr"):
+        light.CreateHeightAttr().Set(float(height))
+    if translate is not None:
+        UsdGeom.XformCommonAPI(light).SetTranslate(
+            Gf.Vec3d(float(translate[0]), float(translate[1]), float(translate[2]))
+        )
+    return {"ok": True, "prim_path": prim_path, "light_type": light_type, "intensity": intensity}
+
+
 TOOLS = {
     "get_stage_info": _impl_get_stage_info,
     "query_stage": _impl_query_stage,
@@ -523,6 +574,7 @@ TOOLS = {
     "save_stage": _impl_save_stage,
     "search_assets": _impl_search_assets,
     "capture_viewport": _impl_capture_viewport,
+    "add_light": _impl_add_light,
 }
 
 
