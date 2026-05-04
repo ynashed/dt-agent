@@ -186,30 +186,48 @@ def _impl_set_transform(
     if not UsdGeom.Xformable(prim):
         return {"error": f"prim is not Xformable: {prim_path}"}
 
-    api = UsdGeom.XformCommonAPI(prim)
-    if translate is not None:
-        api.SetTranslate(Gf.Vec3d(float(translate[0]), float(translate[1]), float(translate[2])))
-    if rotate is not None:
-        api.SetRotate(
-            Gf.Vec3f(float(rotate[0]), float(rotate[1]), float(rotate[2])),
-            UsdGeom.XformCommonAPI.RotationOrderXYZ,
-        )
-    if scale is not None:
-        api.SetScale(Gf.Vec3f(float(scale[0]), float(scale[1]), float(scale[2])))
+    # XformCommonAPI is the fast path but throws on prims whose references
+    # carry an incompatible xform stack (e.g. a matrix op). Fall back to
+    # direct Xformable ops in that case — they write to the current layer
+    # and override the reference's stack.
+    try:
+        api = UsdGeom.XformCommonAPI(prim)
+        if translate is not None:
+            api.SetTranslate(Gf.Vec3d(float(translate[0]), float(translate[1]), float(translate[2])))
+        if rotate is not None:
+            api.SetRotate(
+                Gf.Vec3f(float(rotate[0]), float(rotate[1]), float(rotate[2])),
+                UsdGeom.XformCommonAPI.RotationOrderXYZ,
+            )
+        if scale is not None:
+            api.SetScale(Gf.Vec3f(float(scale[0]), float(scale[1]), float(scale[2])))
+    except Exception:
+        xf = UsdGeom.Xformable(prim)
+        xf.ClearXformOpOrder()
+        if translate is not None:
+            xf.AddTranslateOp().Set(Gf.Vec3d(float(translate[0]), float(translate[1]), float(translate[2])))
+        if rotate is not None:
+            xf.AddRotateXYZOp().Set(Gf.Vec3f(float(rotate[0]), float(rotate[1]), float(rotate[2])))
+        if scale is not None:
+            xf.AddScaleOp().Set(Gf.Vec3f(float(scale[0]), float(scale[1]), float(scale[2])))
     return {"ok": True, "prim_path": prim_path}
 
 
 def _impl_save_stage(file_path: str) -> dict:
-    """Save the current stage to `file_path` inside the container.
-    `file_path` must be on a writable mount; `/workspace/dt-agent/output/...`
-    is the convention (mount that on the host to inspect saved USDs)."""
+    """Save the current stage's root layer to `file_path`.
+
+    Saves only the root layer (references stay as references) rather than
+    flattening the whole stage. stage.Export() inlines every referenced mesh,
+    turning a simple scene into multi-GB files. GetRootLayer().Export() keeps
+    the file small and the references resolvable from their CDN URLs.
+    """
     stage = _stage()
     if stage is None:
         return {"error": "no stage loaded"}
     parent = os.path.dirname(file_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    ok = stage.Export(file_path)
+    ok = stage.GetRootLayer().Export(file_path)
     return {"ok": bool(ok), "file_path": file_path}
 
 
