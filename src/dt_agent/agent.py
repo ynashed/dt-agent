@@ -481,12 +481,101 @@ def _extract_text(response) -> str:
     return "\n".join(parts)
 
 
-def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
-    """Run the agent loop until the goal is satisfied or max_iterations elapse.
+def run_turn(
+    message: str,
+    history: "list[dict[str, Any]]",
+    client: "OpenAI",
+    trace,
+    max_iterations: int = 30,
+    *,
+    log: bool = True,
+    enforce_save: bool = False,
+) -> tuple[str, bool]:
+    """Execute one conversational turn against an existing history.
 
-    Returns:
-        0 on clean termination (model emitted text without tool calls).
-        1 on iteration cap or unrecoverable error.
+    Appends `message` as a user turn, runs the tool loop until the model
+    emits text with no tool calls, and returns (response_text, hit_cap).
+
+    `history` is mutated in-place — the caller owns it across turns.
+    `enforce_save`: if True, intercept any attempt to finish before
+    save_stage has returned ok:true (used by the one-shot `run()` entrypoint).
+    """
+    history.append({"role": "user", "content": message})
+    save_stage_succeeded = False
+
+    for iteration in range(1, max_iterations + 1):
+        if log:
+            print(f"\n[agent] -- iteration {iteration}/{max_iterations} --", file=sys.stderr)
+
+        try:
+            response = client.responses.create(
+                model=LLM_MODEL,
+                instructions=SYSTEM_PROMPT,
+                tools=TOOL_DEFINITIONS,
+                input=history,
+            )
+        except Exception as e:
+            trace("llm_error", iteration=iteration, error=str(e))
+            print(f"[agent] LLM call failed: {type(e).__name__}: {e}", file=sys.stderr)
+            return f"LLM call failed: {e}", False
+
+        trace("llm_response", iteration=iteration, response_id=response.id)
+
+        tool_calls = []
+        for item in response.output or []:
+            try:
+                history.append(item.model_dump())
+            except Exception:
+                history.append({"type": getattr(item, "type", "unknown")})
+            if getattr(item, "type", None) == "function_call":
+                tool_calls.append(item)
+
+        if not tool_calls:
+            if enforce_save and not save_stage_succeeded:
+                nudge = (
+                    "You declared the task done but save_stage was never "
+                    "successfully called — the output file has not been written. "
+                    "Call save_stage with the requested file path now."
+                )
+                history.append({"role": "user", "content": nudge})
+                if log:
+                    print("[agent]  NOTE: intercepted premature finish — save_stage not yet called", file=sys.stderr)
+                trace("save_nudge", iteration=iteration)
+                continue
+            final_text = _extract_text(response) or "(no text returned)"
+            trace("done", iteration=iteration, final_text=final_text)
+            return final_text, False
+
+        for call in tool_calls:
+            args = json.loads(call.arguments) if call.arguments else {}
+            if log:
+                args_repr = json.dumps(args)
+                if len(args_repr) > 160:
+                    args_repr = args_repr[:160] + "..."
+                print(f"[agent]   -> {call.name}({args_repr})", file=sys.stderr)
+            output = _execute_tool(call.name, args)
+            if call.name == "save_stage":
+                try:
+                    if json.loads(output).get("ok"):
+                        save_stage_succeeded = True
+                except Exception:
+                    pass
+            if log:
+                trim = output if len(output) <= 240 else output[:240] + "..."
+                print(f"[agent]      = {trim}", file=sys.stderr)
+            trace("tool_call", iteration=iteration, name=call.name, args=args, output=output)
+            history.append({"type": "function_call_output", "call_id": call.call_id, "output": output})
+
+    if log:
+        print(f"\n[agent] hit iteration cap ({max_iterations}); stopping.", file=sys.stderr)
+    trace("max_iter_reached")
+    return f"(hit iteration cap of {max_iterations})", True
+
+
+def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
+    """One-shot entrypoint: run a single goal to completion and exit.
+
+    Returns 0 on success, 1 on error or iteration cap.
     """
     api_key = os.environ.get("NV_API_KEY")
     if not api_key:
@@ -507,101 +596,10 @@ def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
 
     trace("start", goal=goal, model=LLM_MODEL, sim=SIM_BASE_URL)
 
-    # NV-internal proxy rejects `previous_response_id` (Zero Data Retention).
-    # Maintain the full conversation history client-side and resend it as
-    # `input` every turn. `instructions=` is re-sent every call too.
-    history: list[dict[str, Any]] = [{"role": "user", "content": goal}]
-    save_stage_succeeded = False  # gate: don't exit until save_stage is confirmed
-
-    for iteration in range(1, max_iterations + 1):
-        if log:
-            print(f"\n[agent] -- iteration {iteration}/{max_iterations} --", file=sys.stderr)
-
-        try:
-            response = client.responses.create(
-                model=LLM_MODEL,
-                instructions=SYSTEM_PROMPT,
-                tools=TOOL_DEFINITIONS,
-                input=history,
-            )
-        except Exception as e:
-            trace("llm_error", iteration=iteration, error=str(e))
-            print(f"[agent] LLM call failed: {type(e).__name__}: {e}", file=sys.stderr)
-            return 1
-
-        trace("llm_response", iteration=iteration, response_id=response.id)
-
-        # Echo every output item back into history so the next turn carries
-        # the full conversation. `model_dump()` on each item produces the
-        # right shape for the Responses API to accept as input.
-        tool_calls = []
-        for item in response.output or []:
-            try:
-                history.append(item.model_dump())
-            except Exception:
-                # If the item type isn't a Pydantic model for some reason,
-                # fall back to a best-effort dict so we don't break the loop.
-                history.append({"type": getattr(item, "type", "unknown")})
-            if getattr(item, "type", None) == "function_call":
-                tool_calls.append(item)
-
-        if not tool_calls:
-            if not save_stage_succeeded:
-                # Model is trying to finish without having saved. Re-prompt.
-                nudge = (
-                    "You declared the task done but save_stage was never "
-                    "successfully called — the output file has not been written. "
-                    "Call save_stage with the requested file path now."
-                )
-                history.append({"role": "user", "content": nudge})
-                if log:
-                    print("[agent]  NOTE: intercepted premature finish — save_stage not yet called", file=sys.stderr)
-                trace("save_nudge", iteration=iteration)
-                continue
-            final_text = _extract_text(response) or "(no text returned)"
-            if log:
-                print(f"\n[agent] DONE\n{final_text}", file=sys.stderr)
-            trace("done", iteration=iteration, final_text=final_text)
-            print(final_text)
-            return 0
-
-        # Execute each tool call and append the outputs to history.
-        for call in tool_calls:
-            args = json.loads(call.arguments) if call.arguments else {}
-            if log:
-                args_repr = json.dumps(args)
-                if len(args_repr) > 160:
-                    args_repr = args_repr[:160] + "..."
-                print(f"[agent]   -> {call.name}({args_repr})", file=sys.stderr)
-            output = _execute_tool(call.name, args)
-            if call.name == "save_stage":
-                try:
-                    if json.loads(output).get("ok"):
-                        save_stage_succeeded = True
-                except Exception:
-                    pass
-            if log:
-                trim = output if len(output) <= 240 else output[:240] + "..."
-                print(f"[agent]      = {trim}", file=sys.stderr)
-            trace(
-                "tool_call",
-                iteration=iteration,
-                name=call.name,
-                args=args,
-                output=output,
-            )
-            history.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": call.call_id,
-                    "output": output,
-                }
-            )
-
-    if log:
-        print(
-            f"\n[agent] hit iteration cap ({max_iterations}); stopping.",
-            file=sys.stderr,
-        )
-    trace("max_iter_reached")
-    return 1
+    history: list[dict[str, Any]] = []
+    final_text, hit_cap = run_turn(
+        goal, history, client, trace,
+        max_iterations=max_iterations, log=log, enforce_save=True,
+    )
+    print(final_text)
+    return 1 if hit_cap else 0
