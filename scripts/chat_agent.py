@@ -104,7 +104,13 @@ def main():
             path = raw[len("/save"):].strip()
             raw = _make_slash_save_message(path)
 
-        trace("user_turn", message=raw, history_len=len(history))
+        # Enable quality gates when the user's message contains "save" —
+        # covers "save to ...", "/save", "build X and save", etc.
+        # enforce_observe: model must call observe() before finishing.
+        # enforce_save:    model must call save_stage() before finishing.
+        msg_lower = raw.lower()
+        enforce = "save" in msg_lower
+        trace("user_turn", message=raw, history_len=len(history), enforce_gates=enforce)
         print()  # blank line before agent output
 
         response_text, hit_cap = run_turn(
@@ -114,7 +120,8 @@ def main():
             trace,
             max_iterations=args.max_iter,
             log=True,
-            enforce_save=False,
+            enforce_save=enforce,
+            enforce_observe=enforce,
         )
 
         print(f"\nagent> {response_text}\n")

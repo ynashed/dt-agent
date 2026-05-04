@@ -502,6 +502,7 @@ def run_turn(
     *,
     log: bool = True,
     enforce_save: bool = False,
+    enforce_observe: bool = False,
 ) -> tuple[str, bool]:
     """Execute one conversational turn against an existing history.
 
@@ -509,8 +510,9 @@ def run_turn(
     emits text with no tool calls, and returns (response_text, hit_cap).
 
     `history` is mutated in-place — the caller owns it across turns.
-    `enforce_save`: if True, intercept any attempt to finish before
-    save_stage has returned ok:true (used by the one-shot `run()` entrypoint).
+    `enforce_save`: intercept any attempt to finish before save_stage succeeds.
+    `enforce_observe`: intercept any attempt to finish before observe() is called.
+    Both gates together prevent the model from hallucinating task completion.
     """
     history.append({"role": "user", "content": message})
     save_stage_succeeded = False
@@ -546,6 +548,20 @@ def run_turn(
                 tool_calls.append(item)
 
         if not tool_calls:
+            # Gate 1: require at least one observe() before finishing a build task.
+            if enforce_observe and last_vlm_satisfied is None:
+                nudge = (
+                    "You must call observe() to visually verify the scene before "
+                    "declaring done. Call observe(intent=...) now with an appropriate "
+                    "eye/target for the scene size."
+                )
+                history.append({"role": "user", "content": nudge})
+                if log:
+                    print("[agent]  NOTE: intercepted premature finish — observe() not yet called", file=sys.stderr)
+                trace("observe_nudge", iteration=iteration)
+                continue
+
+            # Gate 2: require save_stage to succeed before finishing.
             if enforce_save and not save_stage_succeeded:
                 nudge = (
                     "You declared the task done but save_stage was never "
@@ -662,7 +678,8 @@ def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:
     history: list[dict[str, Any]] = []
     final_text, hit_cap = run_turn(
         goal, history, client, trace,
-        max_iterations=max_iterations, log=log, enforce_save=True,
+        max_iterations=max_iterations, log=log,
+        enforce_save=True, enforce_observe=True,
     )
     print(final_text)
     return 1 if hit_cap else 0
