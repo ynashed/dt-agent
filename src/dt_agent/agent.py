@@ -100,6 +100,15 @@ Conventions:
 - Do NOT declare the task done if `observe` returns an error or a black image.
   Diagnose and fix (add lights, reposition camera, fix geometry) then re-observe.
 
+Conversational / follow-up turns:
+- When the user asks to "check", "look", or "see" what the scene looks like,
+  call `observe` immediately — do not describe what you plan to do.
+- When the user confirms a proposed plan ("ok", "yes", "go ahead", "proceed",
+  "sure"), execute the plan immediately with tool calls — do not restate the
+  plan in text.
+- Never return an empty response. If you have nothing to say after a tool call
+  chain, summarize what you did in one sentence.
+
 Respond with tool calls until the goal is achieved. Only emit plain text
 (no tool calls) once you're done — that text is what gets returned to the
 human who launched you."""
@@ -502,6 +511,7 @@ def run_turn(
     """
     history.append({"role": "user", "content": message})
     save_stage_succeeded = False
+    stall_count = 0  # consecutive empty-response count; reset on any tool call
 
     for iteration in range(1, max_iterations + 1):
         if log:
@@ -542,10 +552,23 @@ def run_turn(
                     print("[agent]  NOTE: intercepted premature finish — save_stage not yet called", file=sys.stderr)
                 trace("save_nudge", iteration=iteration)
                 continue
-            final_text = _extract_text(response) or "(no text returned)"
+            final_text = _extract_text(response)
+            if not final_text:
+                stall_count += 1
+                if stall_count <= 2:
+                    nudge = "Please continue — execute the next step or summarize what you just did."
+                    history.append({"role": "user", "content": nudge})
+                    if log:
+                        print(f"[agent]  NOTE: empty response (stall {stall_count}/2), nudging", file=sys.stderr)
+                    trace("stall_nudge", iteration=iteration, stall_count=stall_count)
+                    continue
+                trace("done", iteration=iteration, final_text="(stalled after 2 nudges)")
+                return "(stalled — model returned empty responses)", False
+            stall_count = 0
             trace("done", iteration=iteration, final_text=final_text)
             return final_text, False
 
+        stall_count = 0  # any tool call means the model is working
         for call in tool_calls:
             args = json.loads(call.arguments) if call.arguments else {}
             if log:
