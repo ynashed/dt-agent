@@ -99,6 +99,9 @@ Conventions:
   Scale the distance proportionally for other sizes.
 - Do NOT declare the task done if `observe` returns an error or a black image.
   Diagnose and fix (add lights, reposition camera, fix geometry) then re-observe.
+- Do NOT call `save_stage` while the last `observe()` returned
+  `intent_satisfied=false` — the framework will block it. Fix all listed
+  issues, call `observe()` again, and only then save.
 
 Conversational / follow-up turns:
 - When the user asks to "check", "look", or "see" what the scene looks like,
@@ -512,6 +515,8 @@ def run_turn(
     history.append({"role": "user", "content": message})
     save_stage_succeeded = False
     stall_count = 0  # consecutive empty-response count; reset on any tool call
+    last_vlm_issues: list[str] = []     # issues from the most recent observe() call
+    last_vlm_satisfied: bool | None = None  # None = no observe yet this turn
 
     for iteration in range(1, max_iterations + 1):
         if log:
@@ -571,16 +576,51 @@ def run_turn(
         stall_count = 0  # any tool call means the model is working
         for call in tool_calls:
             args = json.loads(call.arguments) if call.arguments else {}
+
+            # Guard: block save_stage if the last observe() was not satisfied.
+            # This prevents the model from declaring done and saving despite a
+            # failed VLM check — a common instruction-following failure.
+            if call.name == "save_stage" and last_vlm_satisfied is False:
+                issues_str = "; ".join(last_vlm_issues) if last_vlm_issues else "see correction_hint"
+                blocked_output = json.dumps({
+                    "error": (
+                        f"save_stage blocked: the last observe() returned "
+                        f"intent_satisfied=false (issues: {issues_str}). "
+                        "Fix the listed issues and call observe() again to "
+                        "confirm before saving."
+                    )
+                })
+                if log:
+                    print(
+                        f"[agent]  BLOCKED save_stage — last observe() not satisfied "
+                        f"(issues: {issues_str})",
+                        file=sys.stderr,
+                    )
+                trace("save_blocked", iteration=iteration, issues=last_vlm_issues)
+                history.append({"type": "function_call_output", "call_id": call.call_id, "output": blocked_output})
+                continue
+
             if log:
                 args_repr = json.dumps(args)
                 if len(args_repr) > 160:
                     args_repr = args_repr[:160] + "..."
                 print(f"[agent]   -> {call.name}({args_repr})", file=sys.stderr)
             output = _execute_tool(call.name, args)
+
+            # Track observe() outcomes so the save guard stays current.
+            if call.name == "observe":
+                try:
+                    obs = json.loads(output)
+                    last_vlm_satisfied = bool(obs.get("intent_satisfied"))
+                    last_vlm_issues = obs.get("issues") or []
+                except Exception:
+                    pass
+
             if call.name == "save_stage":
                 try:
                     if json.loads(output).get("ok"):
                         save_stage_succeeded = True
+                        last_vlm_satisfied = None  # reset guard after a successful save
                 except Exception:
                     pass
             if log:
