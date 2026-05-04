@@ -97,6 +97,7 @@ def _data_uri(path: str | Path) -> str:
 
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
+_INCOMPLETE_THINK = re.compile(r"<think>.*$", flags=re.DOTALL)
 _MISSING_COMMA = re.compile(r'("\s*)\n(\s*)(?=")')
 
 
@@ -110,6 +111,8 @@ def _strip_fences(text: str) -> str:
     """
     text = text.strip()
     text = _THINK_BLOCK.sub("", text).strip()
+    # Strip an incomplete think block (token limit hit before </think>).
+    text = _INCOMPLETE_THINK.sub("", text).strip()
     if not text.startswith("```"):
         return text
     lines = text.splitlines()
@@ -129,6 +132,46 @@ def _try_repair_json(text: str) -> str | None:
     return repaired if repaired != text else None
 
 
+def _try_repair_truncated_json(text: str) -> str | None:
+    """Repair JSON cut off by a token limit — the most common form is an
+    unterminated string in the `observed` field. Closes open strings, injects
+    any missing required fields with safe defaults, and closes the object.
+    Returns None if the result still doesn't parse."""
+    candidate = _MISSING_COMMA.sub(r'\1,\n\2', text).rstrip()
+
+    # Count unescaped double-quotes; odd count means we're inside a string.
+    if sum(1 for _ in re.finditer(r'(?<!\\)"', candidate)) % 2 == 1:
+        candidate += '"'
+
+    # Detect which required fields are already present.
+    has_issues = '"issues"' in candidate
+    has_hint = '"correction_hint"' in candidate
+    is_satisfied = (
+        '"intent_satisfied": true' in candidate
+        or '"intent_satisfied":true' in candidate
+    )
+
+    extras = []
+    if not has_issues:
+        extras.append('"issues": []')
+    if not has_hint:
+        hint = 'null' if is_satisfied else '"Scene could not be fully assessed — observation was truncated"'
+        extras.append(f'"correction_hint": {hint}')
+
+    if extras:
+        if not candidate.rstrip().endswith(','):
+            candidate += ','
+        candidate += ' ' + ', '.join(extras)
+
+    candidate += '}'
+
+    try:
+        json.loads(candidate)
+        return candidate
+    except json.JSONDecodeError:
+        return None
+
+
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "://vlm:", "://vlm/")
 
 
@@ -143,7 +186,7 @@ def observe(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
-    max_tokens: int = 600,
+    max_tokens: int = 2048,
 ) -> Observation:
     """Send a captured frame to Cosmos Reason and return a parsed Observation.
 
@@ -196,22 +239,22 @@ def observe(
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as primary_err:
-        repaired = _try_repair_json(cleaned)
-        if repaired is None:
+        # Try repairs in order: comma fix → truncation fix.
+        for label, attempt in [
+            ("comma-repair", _try_repair_json(cleaned)),
+            ("truncation-repair", _try_repair_truncated_json(cleaned)),
+        ]:
+            if attempt is None:
+                continue
+            try:
+                data = json.loads(attempt)
+                print(f"[vlm] WARN: {label} fixed malformed JSON ({primary_err})", file=sys.stderr)
+                break
+            except json.JSONDecodeError:
+                continue
+        else:
             raise RuntimeError(
                 f"VLM response was not valid JSON ({primary_err}). "
                 f"First 500 chars of response: {cleaned[:500]!r}"
             ) from primary_err
-        try:
-            data = json.loads(repaired)
-            print(
-                f"[vlm] WARN: repaired malformed JSON from VLM ({primary_err})",
-                file=sys.stderr,
-            )
-        except json.JSONDecodeError as repair_err:
-            raise RuntimeError(
-                f"VLM response was not valid JSON, and the repair attempt also "
-                f"failed ({repair_err}). First 500 chars of original response: "
-                f"{cleaned[:500]!r}"
-            ) from repair_err
     return Observation.model_validate(data)
