@@ -208,6 +208,13 @@ at `output/agent_traces/`. CLI: `scripts/run_agent.py "<goal>"`. The agent
 demonstrably cross-validates VLM observations against `query_stage` when
 the two disagree.
 
+**USD Search integration (done):** `search_assets_ai` tool added to the agent.
+Calls `search.simready.omniverse.nvidia.com` with a natural language description,
+authenticated via `NV_API_KEY`. Returns `https://` S3 CDN URLs directly usable
+by `add_reference_to_stage`. Defaults to Isaac 5.1 CDN path for container
+compatibility. `search_assets` (filesystem + curated catalog) remains as offline
+fallback.
+
 **Phase 3 — polish (next):** Tighten the LLM's spatial precision (Cube
 default size = 2.0 trip-up costs the model on table thickness etc.).
 Add a `set_joint_positions` tool so robots render in a recognizable pose

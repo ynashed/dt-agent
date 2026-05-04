@@ -41,6 +41,13 @@ LLM_BASE_URL = os.environ.get(
 LLM_MODEL = os.environ.get("NV_LLM_MODEL", "openai/openai/gpt-5.3-codex")
 SIM_BASE_URL = os.environ.get("DT_AGENT_SIM_URL", "http://localhost:8765")
 
+USD_SEARCH_BASE_URL = "https://search.simready.omniverse.nvidia.com"
+# Default to Isaac 5.1 assets so results are compatible with the running container.
+USD_SEARCH_DEFAULT_PATH = (
+    "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+    "/Assets/Isaac/5.1/"
+)
+
 # Repo root, used to translate container-side capture paths to host paths
 # so the VLM wrapper (running on host) can read the PNG.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -55,8 +62,10 @@ Workflow:
 1. Survey: call `query_stage` to see what's already in the scene.
 2. Plan: identify the prims you need with their target paths and transforms.
 3. Build: use `create_primitive`, `add_reference_to_stage`, and `set_transform`
-   to compose the scene. Use `search_assets` to find USDs by name (e.g. "ur10",
-   "franka") — prefer entries with `verified: true`.
+   to compose the scene. Use `search_assets_ai` to find NVIDIA library USDs by
+   natural language description (e.g. "UR10 robot arm", "conveyor belt",
+   "lab workbench") — pass the `url` field directly to `add_reference_to_stage`.
+   Fall back to `search_assets` only for locally mounted custom assets.
 4. Validate: call `observe(intent)` after substantive edits. The vision model
    returns `{intent_satisfied, observed, issues, correction_hint}`. If the
    observation contradicts what `query_stage` reports, trust `query_stage` for
@@ -184,6 +193,29 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "type": "function",
+        "name": "search_assets_ai",
+        "description": "Search NVIDIA's Isaac/SimReady asset library by natural language description via the USD Search API. Returns USD URLs ready to pass directly to add_reference_to_stage. Defaults to Isaac 5.1 assets (compatible with the running container). Prefer this over search_assets for any NVIDIA library asset.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Natural language description of the desired asset, e.g. 'UR10 robot arm', 'industrial conveyor belt', 'lab workbench', 'microplate'.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results. Default 10.",
+                },
+                "search_path": {
+                    "type": "string",
+                    "description": "Restrict search to a CDN path prefix. Defaults to the Isaac 5.1 CDN root. Pass null to search all versions.",
+                },
+            },
+            "required": ["description"],
+        },
+    },
+    {
+        "type": "function",
         "name": "search_assets",
         "description": "Search the curated NVIDIA OpenUSD CDN catalog AND in-image filesystem for USDs matching `query`. Returns matches with path/url, source, name, description, verified flag.",
         "parameters": {
@@ -247,6 +279,48 @@ def _container_to_host_path(container_path: str) -> str:
     return container_path
 
 
+def _exec_search_assets_ai(
+    description: str,
+    limit: int = 10,
+    search_path: str | None = USD_SEARCH_DEFAULT_PATH,
+) -> dict:
+    """Call the USD Search API and return asset URLs ready for add_reference_to_stage."""
+    api_key = os.environ.get("NV_API_KEY")
+    if not api_key:
+        return {"error": "NV_API_KEY not set"}
+
+    import urllib.parse
+    params: dict[str, Any] = {
+        "description": description,
+        "file_extension_include": "usd",
+        "limit": limit,
+        "return_metadata": "false",
+    }
+    if search_path:
+        params["search_path"] = search_path
+
+    url = f"{USD_SEARCH_BASE_URL}/search?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return {"error": f"USD Search HTTP {e.code}: {e.reason}"}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    items = body if isinstance(body, list) else []
+    matches = [
+        {
+            "url": item.get("url", ""),
+            "score": round(float(item.get("score", 0)), 4),
+            "name": item.get("url", "").rsplit("/", 1)[-1],
+        }
+        for item in items
+    ]
+    return {"matches": matches, "count": len(matches)}
+
+
 def _exec_observe(intent: str) -> dict:
     """Composite tool: capture from the default observation camera, then
     send the resulting PNG to the VLM with the given intent."""
@@ -266,6 +340,7 @@ _TOOL_EXECUTORS = {
     "add_reference_to_stage": lambda **kw: _sim_rpc("add_reference_to_stage", **kw),
     "set_transform": lambda **kw: _sim_rpc("set_transform", **kw),
     "save_stage": lambda **kw: _sim_rpc("save_stage", **kw),
+    "search_assets_ai": lambda **kw: _exec_search_assets_ai(**kw),
     "search_assets": lambda **kw: _sim_rpc("search_assets", **kw),
     "observe": lambda **kw: _exec_observe(**kw),
 }
