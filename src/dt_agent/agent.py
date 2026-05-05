@@ -104,6 +104,10 @@ Conventions:
   workcells. For scenes >5m, pass eye and target to `observe`. A 20×40m
   warehouse centred at the origin: eye=[-30,-30,20], target=[0,0,5].
   Scale the distance proportionally for other sizes.
+- Materials: use `search_materials` + `bind_material` to apply surface materials
+  to any prim. Call `search_materials` first to get the MDL URL, then
+  `bind_material(prim_path, material_url)`. Bind after placing and transforming
+  the prim, before the next `observe` call.
 - Do NOT declare the task done if `observe` returns an error or a black image.
   Diagnose and fix (add lights, reposition camera, fix geometry) then re-observe.
 - Do NOT call `save_stage` while the last `observe()` returned
@@ -323,6 +327,35 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "type": "function",
+        "name": "search_materials",
+        "description": "Search the Isaac Sim built-in material catalog by keyword. Returns MDL URLs ready to pass to bind_material. Available categories: metals (aluminum, brass, copper, stainless steel), plastics (ABS, rubber, vinyl), masonry (brick), carpet. If no query matches, returns the full catalog.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keywords describing the desired material, e.g. 'stainless steel', 'brushed aluminum', 'rubber grip', 'concrete floor'.",
+                },
+                "limit": {"type": "integer", "description": "Max results. Default 5."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "bind_material",
+        "description": "Apply an MDL material (from search_materials) to a prim. Creates a material prim under /World/Looks/ and binds it. Re-binding the same material URL to multiple prims reuses the same material prim.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prim_path": {"type": "string", "description": "Path of the prim to receive the material."},
+                "material_url": {"type": "string", "description": "HTTPS MDL URL from search_materials."},
+            },
+            "required": ["prim_path", "material_url"],
+        },
+    },
+    {
+        "type": "function",
         "name": "observe",
         "description": "Render the scene and ask the VLM whether it matches `intent`. Returns {intent_satisfied, observed, issues, correction_hint}. Slower than RPC tools; call after substantive edits. For large scenes pass eye/target so the camera frames the whole scene.",
         "parameters": {
@@ -388,6 +421,56 @@ def _container_to_host_path(container_path: str) -> str:
         rel = container_path[len(container_prefix):]
         return str(_PROJECT_ROOT / "output" / rel)
     return container_path
+
+
+_MATERIAL_BASE = (
+    "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+    "/Assets/Isaac/6.0/Isaac/Materials"
+)
+
+_MATERIAL_CATALOG: list[dict] = [
+    # Base/Metals
+    {"name": "Aluminum_Anodized",       "url": f"{_MATERIAL_BASE}/Base/Metals/Aluminum_Anodized.mdl",       "tags": ["aluminum", "metal", "anodized", "silver", "smooth"]},
+    {"name": "Aluminum_Anodized_Black", "url": f"{_MATERIAL_BASE}/Base/Metals/Aluminum_Anodized_Black.mdl", "tags": ["aluminum", "metal", "anodized", "black", "dark"]},
+    {"name": "Aluminum_Cast",           "url": f"{_MATERIAL_BASE}/Base/Metals/Aluminum_Cast.mdl",           "tags": ["aluminum", "metal", "cast", "rough", "grey"]},
+    {"name": "Brass",                   "url": f"{_MATERIAL_BASE}/Base/Metals/Brass.mdl",                   "tags": ["brass", "metal", "gold", "yellow", "warm"]},
+    {"name": "Brushed_Antique_Copper",  "url": f"{_MATERIAL_BASE}/Base/Metals/Brushed_Antique_Copper.mdl",  "tags": ["copper", "metal", "brushed", "antique", "orange", "warm"]},
+    {"name": "Copper",                  "url": f"{_MATERIAL_BASE}/Base/Metals/Copper.mdl",                  "tags": ["copper", "metal", "orange", "shiny"]},
+    {"name": "Steel_Stainless",         "url": f"{_MATERIAL_BASE}/Base/Metals/Steel_Stainless.mdl",         "tags": ["steel", "stainless", "metal", "silver", "grey", "industrial"]},
+    # Base/Plastics
+    {"name": "Plastic_ABS",             "url": f"{_MATERIAL_BASE}/Base/Plastics/Plastic_ABS.mdl",           "tags": ["plastic", "abs", "polymer", "hard", "matte"]},
+    {"name": "Rubber_Smooth",           "url": f"{_MATERIAL_BASE}/Base/Plastics/Rubber_Smooth.mdl",         "tags": ["rubber", "smooth", "elastic", "soft", "black"]},
+    {"name": "Rubber_Textured",         "url": f"{_MATERIAL_BASE}/Base/Plastics/Rubber_Textured.mdl",       "tags": ["rubber", "textured", "elastic", "grip", "black"]},
+    {"name": "Vinyl",                   "url": f"{_MATERIAL_BASE}/Base/Plastics/Vinyl.mdl",                 "tags": ["vinyl", "plastic", "smooth", "floor", "covering"]},
+    # Base/Masonry
+    {"name": "Brick_Pavers",            "url": f"{_MATERIAL_BASE}/Base/Masonry/Brick_Pavers.mdl",           "tags": ["brick", "masonry", "pavers", "stone", "floor", "wall", "concrete"]},
+    # Base/Carpet
+    {"name": "Carpet_Diamond_Yellow",   "url": f"{_MATERIAL_BASE}/Base/Carpet/Carpet_Diamond_Yellow.mdl",   "tags": ["carpet", "fabric", "yellow", "floor", "soft"]},
+    # vMaterials_2/Metal
+    {"name": "Aluminum_Brushed",        "url": f"{_MATERIAL_BASE}/vMaterials_2/Metal/Aluminum_Brushed.mdl", "tags": ["aluminum", "metal", "brushed", "silver", "grey"]},
+    {"name": "Aluminum_Scratched",      "url": f"{_MATERIAL_BASE}/vMaterials_2/Metal/Aluminum_Scratched.mdl","tags": ["aluminum", "metal", "scratched", "worn", "aged"]},
+    {"name": "Stainless_Steel",         "url": f"{_MATERIAL_BASE}/vMaterials_2/Metal/Stainless_Steel.mdl",  "tags": ["steel", "stainless", "metal", "silver", "shiny", "industrial"]},
+]
+
+
+def _exec_search_materials(query: str, limit: int = 5) -> dict:
+    """Keyword search over the baked Isaac Sim material catalog."""
+    words = query.lower().split()
+    scored = []
+    for mat in _MATERIAL_CATALOG:
+        haystack = mat["name"].lower().replace("_", " ") + " " + " ".join(mat["tags"])
+        score = sum(haystack.count(w) for w in words)
+        if score > 0:
+            scored.append((score, mat))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    matches = [
+        {"name": m["name"], "url": m["url"], "tags": m["tags"]}
+        for _, m in scored[:limit]
+    ]
+    if not matches:
+        # Return full catalog so the agent can still choose
+        matches = [{"name": m["name"], "url": m["url"], "tags": m["tags"]} for m in _MATERIAL_CATALOG]
+    return {"matches": matches, "count": len(matches)}
 
 
 def _exec_search_assets_ai(
@@ -462,6 +545,8 @@ _TOOL_EXECUTORS = {
     "save_stage": lambda **kw: _sim_rpc("save_stage", **kw),
     "search_assets_ai": lambda **kw: _exec_search_assets_ai(**kw),
     "search_assets": lambda **kw: _sim_rpc("search_assets", **kw),
+    "search_materials": lambda **kw: _exec_search_materials(**kw),
+    "bind_material": lambda **kw: _sim_rpc("bind_material", **kw),
     "get_prim_bounds": lambda **kw: _sim_rpc("get_prim_bounds", **kw),
     "add_light": lambda **kw: _sim_rpc("add_light", **kw),
     "delete_prim": lambda **kw: _sim_rpc("delete_prim", **kw),
@@ -471,7 +556,7 @@ _TOOL_EXECUTORS = {
 # Edit cadence: tools that mutate the stage. After EDIT_CADENCE such calls
 # without an intervening observe(), further edits are blocked until the model
 # observes — prevents "build everything, then observe once at the end."
-_EDIT_TOOLS = {"add_reference_to_stage", "set_transform", "add_light"}
+_EDIT_TOOLS = {"add_reference_to_stage", "set_transform", "add_light", "bind_material"}
 EDIT_CADENCE = 8
 
 # Tools whose successful execution counts as "real progress" toward the build.
@@ -481,6 +566,7 @@ _PROGRESS_TOOLS = {
     "add_reference_to_stage",
     "set_transform",
     "add_light",
+    "bind_material",
     "delete_prim",
     "save_stage",
 }

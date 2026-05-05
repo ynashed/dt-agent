@@ -664,6 +664,44 @@ def _impl_add_light(
     return {"ok": True, "prim_path": prim_path, "light_type": light_type, "intensity": intensity}
 
 
+def _impl_bind_material(prim_path: str, material_url: str) -> dict:
+    """Create an MDL material prim under /World/Looks/ (reusing it if it
+    already exists) and bind it to the prim at prim_path."""
+    stage = _stage()
+    if stage is None:
+        return {"error": "no stage loaded"}
+
+    target = stage.GetPrimAtPath(prim_path)
+    if not target.IsValid():
+        return {"error": f"prim not found: {prim_path}"}
+
+    # Derive a stable prim name from the MDL filename.
+    mdl_name = material_url.rsplit("/", 1)[-1]          # e.g. Steel_Stainless.mdl
+    prim_name = mdl_name.replace(".", "_").replace("-", "_")  # Steel_Stainless_mdl
+    material_prim_path = f"/World/Looks/{prim_name}"
+
+    mat_prim = stage.GetPrimAtPath(material_prim_path)
+    if not mat_prim.IsValid():
+        import omni.kit.commands  # noqa: PLC0415
+        omni.kit.commands.execute(
+            "CreateMdlMaterialPrim",
+            mtl_url=material_url,
+            mtl_name=mdl_name.rsplit(".", 1)[0],   # module name without extension
+            mtl_path=material_prim_path,
+            select_new_prim=False,
+        )
+        mat_prim = stage.GetPrimAtPath(material_prim_path)
+        if not mat_prim.IsValid():
+            return {"error": f"CreateMdlMaterialPrim failed for {material_url}"}
+
+    from pxr import UsdShade  # noqa: PLC0415
+    material = UsdShade.Material(mat_prim)
+    UsdShade.MaterialBindingAPI.Apply(target).Bind(
+        material, UsdShade.Tokens.strongerThanDescendants
+    )
+    return {"ok": True, "prim_path": prim_path, "material_prim_path": material_prim_path}
+
+
 TOOLS = {
     "get_stage_info": _impl_get_stage_info,
     "query_stage": _impl_query_stage,
@@ -675,6 +713,7 @@ TOOLS = {
     "add_light": _impl_add_light,
     "get_prim_bounds": _impl_get_prim_bounds,
     "delete_prim": _impl_delete_prim,
+    "bind_material": _impl_bind_material,
 }
 
 
