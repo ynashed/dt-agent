@@ -667,7 +667,6 @@ def _impl_add_light(
 TOOLS = {
     "get_stage_info": _impl_get_stage_info,
     "query_stage": _impl_query_stage,
-    "create_primitive": _impl_create_primitive,
     "add_reference_to_stage": _impl_add_reference_to_stage,
     "set_transform": _impl_set_transform,
     "save_stage": _impl_save_stage,

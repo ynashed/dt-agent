@@ -58,28 +58,23 @@ tools to inspect, edit, and observe the scene to make it match the goal.
 Workflow:
 1. Survey: call `query_stage` to see what's already in the scene.
 2. Plan: identify the prims you need with their target paths and transforms.
-3. Build: use `create_primitive`, `add_reference_to_stage`, `set_transform`,
-   and `get_prim_bounds` to compose the scene.
+3. Build: use `add_reference_to_stage`, `set_transform`, and `get_prim_bounds`
+   to compose the scene. Every object in the scene must be a referenced USD
+   asset — geometry primitives (Cube, Sphere, Cylinder, etc.) are not available.
    - Scope: add only what the goal explicitly names. A bare "warehouse" or
      "room" is one named component, not a request for individual ceiling
      tiles, structural beams, or scaffolding — only add those if the goal
      lists them.
    - Asset use: for each component the goal names, call `search_assets_ai`.
      If it returns a relevant result, you MUST use `add_reference_to_stage`
-     with one of those URLs. Do NOT substitute Cube/Sphere/Cylinder
-     primitives when an asset is available. Searching is not a substitute
-     for using the result — the model has previously regressed by searching,
-     loading a "probe" or two, then building the actual scene from gray
-     Cubes anyway. If the goal names "wall assets" or "floor assets", the
-     scene MUST contain referenced wall and floor USDs, not Cubes.
-   - Primitives: only when search returns no usable asset for that named
-     component. Pick a shape that matches what was missing.
+     with one of those URLs. If search returns nothing usable, try alternate
+     search terms before giving up — e.g. "workbench" instead of "table".
    - Tiled/modular assets (wall panels, floor tiles): load ONE instance
      under a probe path like `/World/_Probe/<name>`, call `get_prim_bounds`
      to measure, then `delete_prim` the probe so it does NOT appear in
      observe() captures. Then place the real tiles with
      `add_reference_to_stage` + `set_transform`. Do NOT abandon the asset
-     and build Cube walls — tile the asset to fill the surface.
+     and tile with a proxy — only real referenced USDs may appear in the scene.
 4. Validate: call `observe(intent)` after each meaningful chunk of edits —
    not at the end of the build. A "chunk" is one logical addition (e.g. all
    walls, the floor + ceiling, the lighting pass). The framework will block
@@ -97,8 +92,6 @@ Workflow:
 
 Conventions:
 - Z-up world. Units are meters.
-- USD Cube primitives have an authored size of 2.0 (span -1..+1 each axis).
-  scale=[w/2, d/2, h/2] gives a box of dimensions w x d x h meters.
 - Use prim paths under `/World/<your_subtree>/<name>`.
 - Transform args: translate (xyz meters), rotate (xyz Euler degrees), scale.
 - Save USDs to `/workspace/dt-agent/output/<name>.usda` so they appear on the
@@ -169,22 +162,6 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
             },
             "required": [],
-        },
-    },
-    {
-        "type": "function",
-        "name": "create_primitive",
-        "description": "Create a USD primitive at prim_path. Common types: Xform (empty group), Cube, Sphere, Cylinder, Cone, Capsule, Plane.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "prim_path": {"type": "string"},
-                "prim_type": {
-                    "type": "string",
-                    "description": "USD geometry type. Default 'Xform'.",
-                },
-            },
-            "required": ["prim_path"],
         },
     },
     {
@@ -480,7 +457,6 @@ def _exec_observe(
 _TOOL_EXECUTORS = {
     "get_stage_info": lambda **kw: _sim_rpc("get_stage_info", **kw),
     "query_stage": lambda **kw: _sim_rpc("query_stage", **kw),
-    "create_primitive": lambda **kw: _sim_rpc("create_primitive", **kw),
     "add_reference_to_stage": lambda **kw: _sim_rpc("add_reference_to_stage", **kw),
     "set_transform": lambda **kw: _sim_rpc("set_transform", **kw),
     "save_stage": lambda **kw: _sim_rpc("save_stage", **kw),
@@ -495,14 +471,13 @@ _TOOL_EXECUTORS = {
 # Edit cadence: tools that mutate the stage. After EDIT_CADENCE such calls
 # without an intervening observe(), further edits are blocked until the model
 # observes — prevents "build everything, then observe once at the end."
-_EDIT_TOOLS = {"create_primitive", "add_reference_to_stage", "set_transform", "add_light"}
+_EDIT_TOOLS = {"add_reference_to_stage", "set_transform", "add_light"}
 EDIT_CADENCE = 8
 
 # Tools whose successful execution counts as "real progress" toward the build.
 # Used by the auto-extend logic in run_turn to decide whether to keep going
 # past the soft iteration cap.
 _PROGRESS_TOOLS = {
-    "create_primitive",
     "add_reference_to_stage",
     "set_transform",
     "add_light",
