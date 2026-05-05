@@ -74,10 +74,12 @@ Workflow:
      scene MUST contain referenced wall and floor USDs, not Cubes.
    - Primitives: only when search returns no usable asset for that named
      component. Pick a shape that matches what was missing.
-   - Tiled/modular assets (wall panels, floor tiles): load ONE instance,
-     call `get_prim_bounds` to measure it, calculate tile positions, then
-     tile with `add_reference_to_stage` + `set_transform`. Do NOT abandon
-     the asset and build Cube walls — tile the asset to fill the surface.
+   - Tiled/modular assets (wall panels, floor tiles): load ONE instance
+     under a probe path like `/World/_Probe/<name>`, call `get_prim_bounds`
+     to measure, then `delete_prim` the probe so it does NOT appear in
+     observe() captures. Then place the real tiles with
+     `add_reference_to_stage` + `set_transform`. Do NOT abandon the asset
+     and build Cube walls — tile the asset to fill the surface.
 4. Validate: call `observe(intent)` after each meaningful chunk of edits —
    not at the end of the build. A "chunk" is one logical addition (e.g. all
    walls, the floor + ceiling, the lighting pass). The framework will block
@@ -332,6 +334,18 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "type": "function",
+        "name": "delete_prim",
+        "description": "Remove a prim and all its descendants from the stage. Use to clean up probe assets after you've measured them with get_prim_bounds, or to undo a misplaced reference. Probes left on the stage will appear in observe() captures and confuse the VLM.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prim_path": {"type": "string"},
+            },
+            "required": ["prim_path"],
+        },
+    },
+    {
+        "type": "function",
         "name": "observe",
         "description": "Render the scene and ask the VLM whether it matches `intent`. Returns {intent_satisfied, observed, issues, correction_hint}. Slower than RPC tools; call after substantive edits. For large scenes pass eye/target so the camera frames the whole scene.",
         "parameters": {
@@ -474,6 +488,7 @@ _TOOL_EXECUTORS = {
     "search_assets": lambda **kw: _sim_rpc("search_assets", **kw),
     "get_prim_bounds": lambda **kw: _sim_rpc("get_prim_bounds", **kw),
     "add_light": lambda **kw: _sim_rpc("add_light", **kw),
+    "delete_prim": lambda **kw: _sim_rpc("delete_prim", **kw),
     "observe": lambda **kw: _exec_observe(**kw),
 }
 
@@ -482,6 +497,24 @@ _TOOL_EXECUTORS = {
 # observes — prevents "build everything, then observe once at the end."
 _EDIT_TOOLS = {"create_primitive", "add_reference_to_stage", "set_transform", "add_light"}
 EDIT_CADENCE = 8
+
+# Tools whose successful execution counts as "real progress" toward the build.
+# Used by the auto-extend logic in run_turn to decide whether to keep going
+# past the soft iteration cap.
+_PROGRESS_TOOLS = {
+    "create_primitive",
+    "add_reference_to_stage",
+    "set_transform",
+    "add_light",
+    "delete_prim",
+    "save_stage",
+}
+# When the soft iteration cap is reached, auto-extend by this many iterations
+# if recent activity shows real progress. Hard ceiling = AUTO_EXTEND_FACTOR ×
+# the original soft cap.
+AUTO_EXTEND_STEP = 20
+AUTO_EXTEND_FACTOR = 3
+AUTO_EXTEND_WINDOW = 5  # look-back of iterations to check for progress
 
 
 def _execute_tool(name: str, args: dict) -> str:
@@ -544,10 +577,15 @@ def run_turn(
     last_vlm_issues: list[str] = []     # issues from the most recent observe() call
     last_vlm_satisfied: bool | None = None  # None = no observe yet this turn
     edits_since_observe = 0  # cadence counter; reset on observe()
+    soft_cap = max_iterations
+    hard_cap = max_iterations * AUTO_EXTEND_FACTOR
+    progress_log: list[bool] = []  # one entry per iteration; True if any progress tool succeeded
 
-    for iteration in range(1, max_iterations + 1):
+    iteration = 0
+    while iteration < soft_cap:
+        iteration += 1
         if log:
-            print(f"\n[agent] -- iteration {iteration}/{max_iterations} --", file=sys.stderr)
+            print(f"\n[agent] -- iteration {iteration}/{soft_cap} --", file=sys.stderr)
 
         try:
             response = client.chat.completions.create(
@@ -623,6 +661,7 @@ def run_turn(
             return final_text, False
 
         stall_count = 0  # any tool call means the model is working
+        iter_made_progress = False  # set True when any progress tool succeeds this iteration
         for call in tool_calls:
             name = call.function.name
             args = json.loads(call.function.arguments) if call.function.arguments else {}
@@ -699,16 +738,41 @@ def run_turn(
                         edits_since_observe = 0
                 except Exception:
                     pass
+            if name in _PROGRESS_TOOLS:
+                try:
+                    if json.loads(output).get("ok"):
+                        iter_made_progress = True
+                except Exception:
+                    pass
             if log:
                 trim = output if len(output) <= 240 else output[:240] + "..."
                 print(f"[agent]      = {trim}", file=sys.stderr)
             trace("tool_call", iteration=iteration, name=name, args=args, output=output)
             history.append({"role": "tool", "tool_call_id": call.id, "content": output})
 
+        progress_log.append(iter_made_progress)
+        if len(progress_log) > AUTO_EXTEND_WINDOW:
+            progress_log.pop(0)
+
+        # Auto-extend the soft cap when we hit it but the agent is still
+        # actively making productive edits and hasn't saved yet. Bounded by
+        # hard_cap so a runaway loop still terminates.
+        if iteration == soft_cap and soft_cap < hard_cap and not save_stage_succeeded:
+            if any(progress_log):
+                new_cap = min(soft_cap + AUTO_EXTEND_STEP, hard_cap)
+                if log:
+                    print(
+                        f"[agent]  AUTO-EXTEND iteration cap {soft_cap} -> {new_cap} "
+                        f"(still making progress, no save_stage yet)",
+                        file=sys.stderr,
+                    )
+                trace("auto_extend", from_cap=soft_cap, to_cap=new_cap)
+                soft_cap = new_cap
+
     if log:
-        print(f"\n[agent] hit iteration cap ({max_iterations}); stopping.", file=sys.stderr)
-    trace("max_iter_reached")
-    return f"(hit iteration cap of {max_iterations})", True
+        print(f"\n[agent] hit iteration cap ({soft_cap}); stopping.", file=sys.stderr)
+    trace("max_iter_reached", soft_cap=soft_cap, hard_cap=hard_cap)
+    return f"(hit iteration cap of {soft_cap})", True
 
 
 def run(goal: str, max_iterations: int = 30, *, log: bool = True) -> int:

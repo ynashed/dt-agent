@@ -142,12 +142,32 @@ def _impl_query_stage(prim_path: str = "/", depth: int = 3) -> dict:
     }
 
 
+def _ensure_xform_ancestors(stage, prim_path: str) -> None:
+    """Make sure every ancestor of `prim_path` exists as an Xform prim.
+
+    USD's `DefinePrim` will auto-create missing intermediates as typeless
+    prims, which are NOT Xformable — so `set_transform` on the parent of
+    a referenced asset fails with "prim is not Xformable". Walk the chain
+    and define each missing or typeless ancestor as Xform.
+    """
+    parts = [p for p in prim_path.split("/") if p]
+    cur = ""
+    for part in parts[:-1]:
+        cur = cur + "/" + part
+        existing = stage.GetPrimAtPath(cur)
+        if not existing.IsValid():
+            stage.DefinePrim(cur, "Xform")
+        elif not existing.GetTypeName():
+            existing.SetTypeName("Xform")
+
+
 def _impl_create_primitive(prim_path: str, prim_type: str = "Xform") -> dict:
     """Create a USD prim of `prim_type` (Xform / Cube / Sphere / Cylinder /
     Cone / Capsule / Plane) at `prim_path`. Existing prims are left alone."""
     stage = _stage()
     if stage is None:
         return {"error": "no stage loaded"}
+    _ensure_xform_ancestors(stage, prim_path)
     prim = stage.DefinePrim(prim_path, prim_type)
     if not prim.IsValid():
         return {"error": f"failed to create {prim_type} at {prim_path}"}
@@ -156,10 +176,11 @@ def _impl_create_primitive(prim_path: str, prim_type: str = "Xform") -> dict:
 
 def _impl_add_reference_to_stage(usd_path: str, prim_path: str) -> dict:
     """Add `usd_path` as a reference under `prim_path`. Creates an Xform
-    at `prim_path` first if it doesn't exist."""
+    at `prim_path` first if it doesn't exist; ancestors are also Xform."""
     stage = _stage()
     if stage is None:
         return {"error": "no stage loaded"}
+    _ensure_xform_ancestors(stage, prim_path)
     prim = stage.GetPrimAtPath(prim_path)
     if not prim.IsValid():
         prim = stage.DefinePrim(prim_path, "Xform")
@@ -167,6 +188,21 @@ def _impl_add_reference_to_stage(usd_path: str, prim_path: str) -> dict:
             return {"error": f"failed to create container prim at {prim_path}"}
     ok = prim.GetReferences().AddReference(usd_path)
     return {"ok": bool(ok), "prim_path": prim_path, "usd_path": usd_path}
+
+
+def _impl_delete_prim(prim_path: str) -> dict:
+    """Remove a prim and all its descendants from the stage. Use to clean
+    up probe assets after measurement, or to undo a misplaced reference."""
+    stage = _stage()
+    if stage is None:
+        return {"error": "no stage loaded"}
+    if prim_path in ("", "/", "/World"):
+        return {"error": f"refusing to delete protected path: {prim_path!r}"}
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        return {"error": f"prim not found: {prim_path}"}
+    ok = stage.RemovePrim(prim_path)
+    return {"ok": bool(ok), "prim_path": prim_path}
 
 
 def _impl_set_transform(
@@ -594,6 +630,7 @@ def _impl_add_light(
         return {"error": "no stage loaded"}
     if light_type not in _LIGHT_TYPE_MAP:
         return {"error": f"unknown light_type '{light_type}'. Valid: {list(_LIGHT_TYPE_MAP)}"}
+    _ensure_xform_ancestors(stage, prim_path)
     light = _LIGHT_TYPE_MAP[light_type].Define(stage, prim_path)
     if not light:
         return {"error": f"failed to create {light_type} at {prim_path}"}
@@ -624,6 +661,7 @@ TOOLS = {
     "capture_viewport": _impl_capture_viewport,
     "add_light": _impl_add_light,
     "get_prim_bounds": _impl_get_prim_bounds,
+    "delete_prim": _impl_delete_prim,
 }
 
 
