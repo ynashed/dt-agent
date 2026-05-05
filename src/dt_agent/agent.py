@@ -38,7 +38,7 @@ from dt_agent.vlm import observe as vlm_observe
 LLM_BASE_URL = os.environ.get(
     "NV_LLM_BASE_URL", "https://inference-api.nvidia.com/v1"
 )
-LLM_MODEL = os.environ.get("NV_LLM_MODEL", "nvidia/nvidia/nemotron-3-super-120b-long-ctx")
+LLM_MODEL = os.environ.get("NV_LLM_MODEL", "aws/anthropic/bedrock-claude-opus-4-7")
 SIM_BASE_URL = os.environ.get("DT_AGENT_SIM_URL", "http://localhost:8765")
 
 USD_SEARCH_BASE_URL = "https://search.simready.omniverse.nvidia.com"
@@ -536,7 +536,7 @@ def run_turn(
                 messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
                 tools=TOOL_DEFINITIONS,
                 parallel_tool_calls=True,
-                temperature=0.2,
+                #temperature=0.2,
             )
         except Exception as e:
             trace("llm_error", iteration=iteration, error=str(e))
