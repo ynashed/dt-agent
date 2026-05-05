@@ -32,14 +32,28 @@ Endpoints
                       response: {"result": <json>}  or  {"error": "..."}
 """
 
+import os
+
 # SimulationApp must be constructed before any other omni.* import.
 from isaacsim import SimulationApp  # type: ignore
 
-sim_app = SimulationApp({"headless": True})
+# Optional WebRTC livestream — boots Kit with the streaming experience so a
+# remote client (Isaac Sim WebRTC Streaming Client at 127.0.0.1) can watch
+# the scene live as the agent edits. Requires the container to run with
+# network_mode: host (WebRTC negotiation does not work through bridged
+# networking). Toggle via DT_AGENT_LIVESTREAM=1 in the compose env.
+_LIVESTREAM = os.environ.get("DT_AGENT_LIVESTREAM", "0") == "1"
+_STREAMING_EXPERIENCE = "/isaac-sim/apps/isaacsim.exp.full.streaming.kit"
+
+if _LIVESTREAM:
+    print(f"[sim_server] livestream enabled — loading {_STREAMING_EXPERIENCE}")
+    print("[sim_server] connect via Isaac Sim WebRTC Streaming Client at 127.0.0.1")
+    sim_app = SimulationApp({"headless": True}, experience=_STREAMING_EXPERIENCE)
+else:
+    sim_app = SimulationApp({"headless": True})
 
 import concurrent.futures  # noqa: E402
 import json  # noqa: E402
-import os  # noqa: E402
 import queue  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402

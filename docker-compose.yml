@@ -9,6 +9,11 @@
 # Endpoints (host):
 #   http://localhost:8765   — Isaac Sim HTTP RPC (sim_server.py)
 #   http://localhost:8000   — Cosmos Reason 2 8B chat completions
+#   localhost:49100 (TCP)   — WebRTC signaling (Isaac Sim livestream)
+#   localhost:47998 (UDP)   — WebRTC media (Isaac Sim livestream)
+#
+# Connect a viewer with the Isaac Sim WebRTC Streaming Client at 127.0.0.1.
+# Toggle the livestream off by removing DT_AGENT_LIVESTREAM=1 below.
 #
 # GPU layout (2x RTX 6000 Pro Blackwell):
 #   GPU 0 -> isaac-sim   (rendering + physics)
@@ -20,6 +25,10 @@ services:
       context: .
       dockerfile: Dockerfile.isaacsim
     container_name: dt-agent-sim
+    # WebRTC livestream requires host networking — bridge mode breaks ICE
+    # negotiation. With host mode all container ports bind directly on the
+    # host, so the explicit `ports:` block below is dropped.
+    network_mode: host
     deploy:
       resources:
         reservations:
@@ -31,8 +40,7 @@ services:
       - ACCEPT_EULA=Y
       - PRIVACY_CONSENT=Y
       - OMNI_KIT_ALLOW_ROOT=1
-    ports:
-      - "8765:8765"
+      - DT_AGENT_LIVESTREAM=1
     volumes:
       # Code mounted read-only — edit on host, restart container to pick up changes.
       - ./src:/workspace/dt-agent/src:ro
