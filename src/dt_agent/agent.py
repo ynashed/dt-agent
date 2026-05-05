@@ -60,16 +60,24 @@ Workflow:
 2. Plan: identify the prims you need with their target paths and transforms.
 3. Build: use `create_primitive`, `add_reference_to_stage`, `set_transform`,
    and `get_prim_bounds` to compose the scene.
-   - Add only what the goal explicitly names. Do NOT decompose generic
-     environments — a "warehouse" or "room" is not by itself a request for
-     individual wall panels, ceiling tiles, beams, or scaffolding. When in
-     doubt, build the smaller scene; the user can always ask for more.
-   - For each component the goal does name, call `search_assets_ai`. If it
-     returns a relevant asset, prefer it over a Cube/Sphere. If it does not,
-     fall back to a primitive shaped to match.
-   - For modular/tiled assets (wall panels, floor tiles): load ONE instance,
+   - Scope: add only what the goal explicitly names. A bare "warehouse" or
+     "room" is one named component, not a request for individual ceiling
+     tiles, structural beams, or scaffolding — only add those if the goal
+     lists them.
+   - Asset use: for each component the goal names, call `search_assets_ai`.
+     If it returns a relevant result, you MUST use `add_reference_to_stage`
+     with one of those URLs. Do NOT substitute Cube/Sphere/Cylinder
+     primitives when an asset is available. Searching is not a substitute
+     for using the result — the model has previously regressed by searching,
+     loading a "probe" or two, then building the actual scene from gray
+     Cubes anyway. If the goal names "wall assets" or "floor assets", the
+     scene MUST contain referenced wall and floor USDs, not Cubes.
+   - Primitives: only when search returns no usable asset for that named
+     component. Pick a shape that matches what was missing.
+   - Tiled/modular assets (wall panels, floor tiles): load ONE instance,
      call `get_prim_bounds` to measure it, calculate tile positions, then
-     tile with `add_reference_to_stage` + `set_transform`.
+     tile with `add_reference_to_stage` + `set_transform`. Do NOT abandon
+     the asset and build Cube walls — tile the asset to fill the surface.
 4. Validate: call `observe(intent)` after each meaningful chunk of edits —
    not at the end of the build. A "chunk" is one logical addition (e.g. all
    walls, the floor + ceiling, the lighting pass). The framework will block
