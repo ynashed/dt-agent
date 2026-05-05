@@ -60,24 +60,28 @@ Workflow:
 2. Plan: identify the prims you need with their target paths and transforms.
 3. Build: use `create_primitive`, `add_reference_to_stage`, `set_transform`,
    and `get_prim_bounds` to compose the scene.
-   - For every named component (robot, wall, floor, conveyor, etc.) call
-     `search_assets_ai` first. If it returns relevant results, you MUST use
-     `add_reference_to_stage` with one of those URLs — do NOT substitute
-     Cube/Sphere primitives.
+   - Add only what the goal explicitly names. Do NOT decompose generic
+     environments — a "warehouse" or "room" is not by itself a request for
+     individual wall panels, ceiling tiles, beams, or scaffolding. When in
+     doubt, build the smaller scene; the user can always ask for more.
+   - For each component the goal does name, call `search_assets_ai`. If it
+     returns a relevant asset, prefer it over a Cube/Sphere. If it does not,
+     fall back to a primitive shaped to match.
    - For modular/tiled assets (wall panels, floor tiles): load ONE instance,
      call `get_prim_bounds` to measure it, calculate tile positions, then
      tile with `add_reference_to_stage` + `set_transform`.
-   - Only use Cube/Sphere/Cylinder primitives for components where search
-     returned no usable asset.
-4. Validate: call `observe(intent)` after substantive edits. The vision model
-   returns `{intent_satisfied, observed, issues, correction_hint}`. If the
-   observation contradicts what `query_stage` reports, trust `query_stage` for
-   ground truth — the VLM may misidentify visually ambiguous geometry.
-   A completely black or near-black image means no light reaches the camera —
-   do NOT save or declare done. For enclosed spaces add interior lights with
-   `add_light` before observing again.
+4. Validate: call `observe(intent)` after each meaningful chunk of edits —
+   not at the end of the build. A "chunk" is one logical addition (e.g. all
+   walls, the floor + ceiling, the lighting pass). The framework will block
+   further edits if you exceed ~8 edit calls without an intervening observe.
+   The vision model returns `{intent_satisfied, observed, issues,
+   correction_hint}`. If the observation contradicts what `query_stage`
+   reports, trust `query_stage` for ground truth — the VLM may misidentify
+   visually ambiguous geometry. A completely black or near-black image means
+   no light reaches the camera — do NOT save or declare done. For enclosed
+   spaces add interior lights with `add_light` before observing again.
 5. Iterate: when `intent_satisfied` is false, address the `issues` list one
-   at a time. Re-observe between meaningful edits, not every primitive.
+   item at a time, then re-observe.
 6. Save: when satisfied, `save_stage` to the requested file path and reply
    with a brief plain-text summary (no tool calls) to signal completion.
 
@@ -465,6 +469,12 @@ _TOOL_EXECUTORS = {
     "observe": lambda **kw: _exec_observe(**kw),
 }
 
+# Edit cadence: tools that mutate the stage. After EDIT_CADENCE such calls
+# without an intervening observe(), further edits are blocked until the model
+# observes — prevents "build everything, then observe once at the end."
+_EDIT_TOOLS = {"create_primitive", "add_reference_to_stage", "set_transform", "add_light"}
+EDIT_CADENCE = 8
+
 
 def _execute_tool(name: str, args: dict) -> str:
     """Execute a tool and return a JSON-encoded string (what the Responses
@@ -525,6 +535,7 @@ def run_turn(
     stall_count = 0  # consecutive empty-response count; reset on any tool call
     last_vlm_issues: list[str] = []     # issues from the most recent observe() call
     last_vlm_satisfied: bool | None = None  # None = no observe yet this turn
+    edits_since_observe = 0  # cadence counter; reset on observe()
 
     for iteration in range(1, max_iterations + 1):
         if log:
@@ -608,6 +619,30 @@ def run_turn(
             name = call.function.name
             args = json.loads(call.function.arguments) if call.function.arguments else {}
 
+            # Guard: enforce observe cadence — block further edits when too many
+            # have piled up since the last observe().
+            if name in _EDIT_TOOLS and edits_since_observe >= EDIT_CADENCE:
+                blocked_output = json.dumps({
+                    "error": (
+                        f"edit cadence limit: {edits_since_observe} edits since "
+                        f"the last observe(). Call observe(intent=...) now to "
+                        "verify the scene before any further edits, then resume."
+                    )
+                })
+                if log:
+                    print(
+                        f"[agent]  BLOCKED {name} — {edits_since_observe} edits without observe",
+                        file=sys.stderr,
+                    )
+                trace(
+                    "cadence_blocked",
+                    iteration=iteration,
+                    name=name,
+                    edits_since_observe=edits_since_observe,
+                )
+                history.append({"role": "tool", "tool_call_id": call.id, "content": blocked_output})
+                continue
+
             # Guard: block save_stage if the last observe() was not satisfied.
             if name == "save_stage" and last_vlm_satisfied is False:
                 issues_str = "; ".join(last_vlm_issues) if last_vlm_issues else "see correction_hint"
@@ -642,14 +677,18 @@ def run_turn(
                     obs = json.loads(output)
                     last_vlm_satisfied = bool(obs.get("intent_satisfied"))
                     last_vlm_issues = obs.get("issues") or []
+                    edits_since_observe = 0
                 except Exception:
                     pass
+            elif name in _EDIT_TOOLS:
+                edits_since_observe += 1
 
             if name == "save_stage":
                 try:
                     if json.loads(output).get("ok"):
                         save_stage_succeeded = True
                         last_vlm_satisfied = None  # reset guard after a successful save
+                        edits_since_observe = 0
                 except Exception:
                     pass
             if log:
