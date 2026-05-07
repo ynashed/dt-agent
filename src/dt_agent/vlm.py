@@ -186,7 +186,7 @@ def observe(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
-    max_tokens: int = 2048,
+    max_tokens: int = 4096,
 ) -> Observation:
     """Send a captured frame to Cosmos Reason and return a parsed Observation.
 
