@@ -1,0 +1,3 @@
+[submodule "content-agents"]
+	path = content-agents
+	url = https://github.com/NVIDIA-Omniverse/content-agents.git

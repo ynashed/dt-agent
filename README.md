@@ -11,10 +11,8 @@ execute → observe (VLM) → reflect**.
 | Layer | Technology |
 |---|---|
 | Coder/Planner LLM | GPT-5.3-codex via NV inference proxy (Responses API) |
-| VLM | Cosmos Reason via build.nvidia.com *(planned)* |
+| VLM | Cosmos Reason 2 8B (self-hosted NIM, fallback to build.nvidia.com) |
 | Sim runtime | `nvcr.io/nvidia/isaac-sim:5.1.0`, exposed via stdlib HTTP RPC on `:8765` |
-| Framework | NeMo Agent Toolkit (NAT) *(planned)* |
-| Deployment target | Astra *(post-PoC)* |
 
 ## Setup
 
@@ -91,7 +89,7 @@ stand-ins (Cube primitives) — and saves to
 `/workspace/dt-agent/output/workcell.usda` inside the container. Proves the
 RPC tool surface composes into a real scene before the LLM is in the loop.
 
-**VLM observation (Phase 2.0):**
+**VLM observation:**
 
 ```bash
 python scripts/observe_capture.py output/captures/capture_<latest>.png \
@@ -102,7 +100,7 @@ Sends the PNG to the local Cosmos Reason 2 8B NIM at
 `http://localhost:8000` (default in `.env.example`) and prints a structured
 `Observation` JSON: `{intent_satisfied, observed, issues, correction_hint}`.
 
-**Agent loop (Phase 2.5):**
+**Agent loop:**
 
 ```bash
 python scripts/run_agent.py \
@@ -128,7 +126,7 @@ agent host (added later, in its own clean Python env).
                     →  `{"result": <json>}`  on success
                     →  `{"error": "..."}`  on failure (also non-200)
 
-Phase 1 tool surface:
+Tool surface:
 
 | Tool | Args | Returns |
 |---|---|---|
@@ -162,7 +160,7 @@ from an existing camera prim with whatever transform it already has.
 dt-agent/
 ├── Dockerfile.isaacsim          # nvcr.io/nvidia/isaac-sim:5.1.0 (vanilla; root user)
 ├── docker-compose.yml           # GPU passthrough, port 8765, cache + code mounts
-├── hello_inference.py           # Phase 0 LLM-proxy validator
+├── hello_inference.py           # LLM-proxy validator
 ├── pyproject.toml
 ├── catalog/
 │   └── asset_catalog.json       # Curated NVIDIA OpenUSD CDN URLs
@@ -177,47 +175,3 @@ dt-agent/
     ├── observe_capture.py       # Runs on host: VLM observation of a captured PNG
     └── run_agent.py             # Runs on host: end-to-end agent loop CLI
 ```
-
-## Status
-
-**Phase 0 — bootstrap (done):** LLM proxy validated; Isaac Sim container +
-HTTP RPC pipe smoke-tested end-to-end.
-
-**Phase 1 — open-loop authoring (done):** tool surface for stage inspection
-and edit (`query_stage`, `create_primitive`, `add_reference_to_stage`,
-`set_transform`, `save_stage`, `search_assets`). Curated asset catalog on
-top of NVIDIA's OpenUSD CDN with HTTPS fetch confirmed. Scripted workcell
-demo composes table + UR10e + conveyor + microplates without an LLM, opens
-in Isaac Sim GUI on the host.
-
-**Phase 1.5 — viewport capture (done):** `capture_viewport` RPC renders a
-fixed-pose observation camera to PNG. Saves to `./output/captures/`.
-
-**Phase 2.0 — VLM observation (done):** `dt_agent.vlm.observe(image, intent)`
-sends a captured frame to **Cosmos Reason 2 8B** (default: local NIM at
-`localhost:8000`) and returns a Pydantic-validated `Observation`
-(intent_satisfied, observed, issues, correction_hint). Standalone CLI:
-`scripts/observe_capture.py`.
-
-**Phase 2.5 — agent loop (done):** GPT-5.3-codex via Responses API drives a
-tool-calling loop. Tools: all the sim_server RPCs + composite
-`observe(intent)`. Stateless mode (the NV-internal proxy rejects
-`previous_response_id` due to Zero Data Retention) — full conversation
-history is maintained client-side and re-sent each turn. Trace log per run
-at `output/agent_traces/`. CLI: `scripts/run_agent.py "<goal>"`. The agent
-demonstrably cross-validates VLM observations against `query_stage` when
-the two disagree.
-
-**USD Search integration (done):** `search_assets_ai` tool added to the agent.
-Calls `search.simready.omniverse.nvidia.com` with a natural language description,
-authenticated via `NV_API_KEY`. Returns `https://` S3 CDN URLs directly usable
-by `add_reference_to_stage`. Defaults to Isaac 5.1 CDN path for container
-compatibility. `search_assets` (filesystem + curated catalog) remains as offline
-fallback.
-
-**Phase 3 — polish (next):** Tighten the LLM's spatial precision (Cube
-default size = 2.0 trip-up costs the model on table thickness etc.).
-Add a `set_joint_positions` tool so robots render in a recognizable pose
-rather than the flat default. Optionally widen the VLM observation prompt
-to flag specific drift (e.g. "object floats above surface", "object
-penetrates surface").
