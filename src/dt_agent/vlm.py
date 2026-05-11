@@ -79,6 +79,10 @@ Rules — follow these EXACTLY:
   problem AND correction_hint MUST be a non-null actionable string.
 - If intent_satisfied is true: issues MUST be [] and correction_hint MUST
   be null.
+- Length budget: keep `observed` under 200 characters total. Each `issues`
+  entry under 100 characters. Be terse — name what you see, do not narrate,
+  elaborate, or describe lighting/mood/style. Overlong responses get
+  truncated mid-stream and discarded.
 
 Emit ONLY the JSON object. No markdown fences, no preamble, no commentary."""
 
@@ -134,29 +138,33 @@ def _try_repair_json(text: str) -> str | None:
 
 def _try_repair_truncated_json(text: str) -> str | None:
     """Repair JSON cut off by a token limit — the most common form is an
-    unterminated string in the `observed` field. Closes open strings, injects
-    any missing required fields with safe defaults, and closes the object.
-    Returns None if the result still doesn't parse."""
+    unterminated string in the `observed` field. Closes open strings, FORCES
+    intent_satisfied=false (a truncated response cannot be trusted as a
+    positive verdict — the model may have committed to `true` before getting
+    cut off mid-observed), injects any missing required fields, and closes
+    the object. Returns None if the result still doesn't parse."""
     candidate = _MISSING_COMMA.sub(r'\1,\n\2', text).rstrip()
 
     # Count unescaped double-quotes; odd count means we're inside a string.
     if sum(1 for _ in re.finditer(r'(?<!\\)"', candidate)) % 2 == 1:
         candidate += '"'
 
-    # Detect which required fields are already present.
+    # Force a negative verdict. Better to false-fail (agent re-observes) than
+    # false-pass (save-gate trusts a truncated "true" and writes a bad scene).
+    candidate = re.sub(
+        r'"intent_satisfied"\s*:\s*true',
+        '"intent_satisfied": false',
+        candidate,
+    )
+
     has_issues = '"issues"' in candidate
     has_hint = '"correction_hint"' in candidate
-    is_satisfied = (
-        '"intent_satisfied": true' in candidate
-        or '"intent_satisfied":true' in candidate
-    )
 
     extras = []
     if not has_issues:
-        extras.append('"issues": []')
+        extras.append('"issues": ["VLM response was truncated; assessment incomplete"]')
     if not has_hint:
-        hint = 'null' if is_satisfied else '"Scene could not be fully assessed — observation was truncated"'
-        extras.append(f'"correction_hint": {hint}')
+        extras.append('"correction_hint": "Observation was truncated mid-response — re-observe with a tighter intent or a different camera angle."')
 
     if extras:
         if not candidate.rstrip().endswith(','):
