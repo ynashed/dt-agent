@@ -1,23 +1,29 @@
-# dt-agent — Isaac Sim 5.1 + Cosmos Reason 2 8B NIM (self-hosted VLM)
+# dt-agent — Isaac Sim 5.1 + Cosmos Reason 2 8B NIM + Material Agent
 #
 # Usage:
 #   docker login nvcr.io -u '$oauthtoken' -p $NGC_API_KEY    # one-time
+#   git submodule update --init --recursive                  # one-time
 #   docker compose pull vlm                                  # pulls NIM image
-#   docker compose build                                     # builds isaac-sim
-#   docker compose up                                        # starts both
+#   docker compose build                                     # builds the rest
+#   docker compose up                                        # starts everything
 #
 # Endpoints (host):
 #   http://localhost:8765   — Isaac Sim HTTP RPC (sim_server.py)
 #   http://localhost:8000   — Cosmos Reason 2 8B chat completions
+#   http://localhost:8001   — OVRTX rendering API (material-agent sidecar)
+#   http://localhost:8002   — material-agent-service REST API
 #   localhost:49100 (TCP)   — WebRTC signaling (Isaac Sim livestream)
 #   localhost:47998 (UDP)   — WebRTC media (Isaac Sim livestream)
 #
 # Connect a viewer with the Isaac Sim WebRTC Streaming Client at 127.0.0.1.
 # Toggle the livestream off by removing DT_AGENT_LIVESTREAM=1 below.
 #
-# GPU layout (2x RTX 6000 Pro Blackwell):
-#   GPU 0 -> isaac-sim   (rendering + physics)
-#   GPU 1 -> vlm         (Cosmos Reason 2 8B inference)
+# GPU layout (2x RTX 6000 Pro Blackwell, 96 GB each):
+#   GPU 0 -> isaac-sim          (rendering + physics, ~30–40 GB)
+#         -> ovrtx-rendering-api (shared; both intermittent — needs ≥48 GB)
+#   GPU 1 -> vlm                (Cosmos Reason 2 8B inference, ~16 GB)
+# material-agent-service is CPU-only and routes VLM calls to the `vlm`
+# service above (Cosmos Reason 2 8B) via docker DNS — no extra VLM process.
 
 services:
   isaac-sim:
@@ -93,6 +99,87 @@ services:
       # (several GB) and slow; this makes subsequent starts fast.
       - dt-agent-vlm-cache:/opt/nim/.cache
 
+  # ──────────────────────────────────────────────────────────────────────────
+  # Material Agent integration (NVIDIA-Omniverse/content-agents)
+  # ──────────────────────────────────────────────────────────────────────────
+  # Builds from ../content-agents — clone that repo as a sibling dir.
+  # Provides VLM-driven material assignment via REST. dt-agent's host-side
+  # `materialize(prim_path)` tool (added in a later commit) will POST to
+  # material-agent-service, poll for completion, fetch predictions JSONL,
+  # then apply via our existing bind_material RPC.
+
+  ovrtx-rendering-api:
+    build:
+      context: ./content-agents
+      dockerfile: apps/ovrtx_rendering_api/Dockerfile
+    container_name: dt-agent-ovrtx
+    ports:
+      - "8001:8000"
+    environment:
+      - OVRTX_LOG_LEVEL=warn
+      # PT = path tracing (Kit-parity ground truth, ~9 ms / step at 512x512).
+      # 500 steps hit the convergence plateau on the kit golden scene.
+      - OVRTX_RENDER_MODE=pt
+      - OVRTX_NUM_SENSOR_UPDATES=500
+      # Cold start commonly takes ~5 min before gpu_initialized=true.
+      - OVRTX_DAEMON_START_TIMEOUT=600
+      - OVRTX_DAEMON_RENDER_TIMEOUT=1800
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]   # shared with isaac-sim; both intermittent
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health | grep -q '\"gpu_initialized\":true'"]
+      interval: 30s
+      timeout: 10s
+      retries: 12
+      start_period: 120s
+
+  material-agent-service:
+    build:
+      context: ./content-agents
+      dockerfile: apps/material_agent_service/Dockerfile
+    container_name: dt-agent-material-agent
+    ports:
+      - "8002:8000"   # remapped from 8000 — clashes with `vlm` above
+    depends_on:
+      ovrtx-rendering-api:
+        condition: service_healthy
+    environment:
+      # Rendering: local OVRTX sidecar over the compose bridge network.
+      - RENDER_ENDPOINT=http://ovrtx-rendering-api:8000
+      - MA_RENDERING_USE_DATA_URI=true
+      # VLM: route to our existing Cosmos Reason 2 8B NIM via docker DNS.
+      # Saves a third VLM process. Override MA_VLM_* in .env to point at
+      # build.nvidia.com / OpenAI / Anthropic / Gemini if Cosmos Reason
+      # turns out to be too small for the material-identification task.
+      - MA_VLM_BACKEND=nim
+      - MA_VLM_MODEL=nvidia/cosmos-reason2-8b
+      - MA_VLM_NIM_BASE_URL=http://vlm:8000/v1
+      - MA_LLM_BACKEND=nim
+      - MA_LLM_MODEL=nvidia/cosmos-reason2-8b
+      # Our local NIM doesn't authenticate, but the SDK requires non-empty.
+      - NVIDIA_API_KEY=${NV_API_KEY:-not-needed}
+      # Service config
+      - MA_STORAGE_KIND=local
+      - MA_SESSION_STORAGE_PATH=/var/material-agent/sessions
+      - MA_SESSION_TTL_HOURS=24
+      - MA_MAX_ACTIVE_SESSIONS=8
+      - MA_MAX_UPLOAD_SIZE_MB=500
+    volumes:
+      - dt-agent-material-sessions:/var/material-agent/sessions
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
 volumes:
   dt-agent-kit-cache:
   dt-agent-ov-cache:
@@ -102,3 +189,4 @@ volumes:
   dt-agent-logs:
   dt-agent-data:
   dt-agent-vlm-cache:
+  dt-agent-material-sessions:
