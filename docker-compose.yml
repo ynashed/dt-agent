@@ -5,13 +5,19 @@
 #   git submodule update --init --recursive                  # one-time
 #   docker compose pull vlm                                  # pulls NIM image
 #   docker compose build                                     # builds the rest
-#   docker compose up                                        # starts everything
+#
+#   docker compose up                                        # default — isaac-sim + vlm only
+#   docker compose --profile materialize up                  # + material-agent + ovrtx
+#
+# Why two modes: OVRTX claims ~48 GB on GPU 0 the moment it starts, which
+# competes with isaac-sim's rendering. Keep it off unless you're actively
+# running materialize() — bring the materialize profile up on demand.
 #
 # Endpoints (host):
 #   http://localhost:8765   — Isaac Sim HTTP RPC (sim_server.py)
 #   http://localhost:8000   — Cosmos Reason 2 8B chat completions
-#   http://localhost:8001   — OVRTX rendering API (material-agent sidecar)
-#   http://localhost:8002   — material-agent-service REST API
+#   http://localhost:8001   — OVRTX rendering API     (materialize profile)
+#   http://localhost:8002   — material-agent REST API (materialize profile)
 #   localhost:49100 (TCP)   — WebRTC signaling (Isaac Sim livestream)
 #   localhost:47998 (UDP)   — WebRTC media (Isaac Sim livestream)
 #
@@ -20,7 +26,7 @@
 #
 # GPU layout (2x RTX 6000 Pro Blackwell, 96 GB each):
 #   GPU 0 -> isaac-sim          (rendering + physics, ~30–40 GB)
-#         -> ovrtx-rendering-api (shared; both intermittent — needs ≥48 GB)
+#         -> ovrtx-rendering-api (materialize profile only; ~48 GB)
 #   GPU 1 -> vlm                (Cosmos Reason 2 8B inference, ~16 GB)
 # material-agent-service is CPU-only and routes VLM calls to the `vlm`
 # service above (Cosmos Reason 2 8B) via docker DNS — no extra VLM process.
@@ -109,6 +115,7 @@ services:
   # then apply via our existing bind_material RPC.
 
   ovrtx-rendering-api:
+    profiles: [materialize]
     build:
       context: ./content-agents
       dockerfile: apps/ovrtx_rendering_api/Dockerfile
@@ -140,6 +147,7 @@ services:
       start_period: 120s
 
   material-agent-service:
+    profiles: [materialize]
     build:
       context: ./content-agents
       dockerfile: apps/material_agent_service/Dockerfile
