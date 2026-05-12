@@ -405,8 +405,20 @@ def _sim_rpc(tool: str, **args) -> Any:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=120) as r:
-        body = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            body = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        # The server puts {"error": "<ExceptionType>: <msg>"} in 4xx/5xx bodies;
+        # urlopen raises before we'd otherwise read it. Pull the real error out
+        # so the agent trace shows the actual Kit/USD exception, not a bare
+        # "HTTP 500 Internal Server Error".
+        try:
+            err_body = json.loads(e.read())
+            detail = err_body.get("error") or f"HTTP {e.code} (empty body)"
+        except Exception:
+            detail = f"HTTP {e.code} {e.reason}"
+        raise RuntimeError(f"{tool}: {detail}") from None
     if "error" in body:
         raise RuntimeError(f"{tool}: {body['error']}")
     return body["result"]

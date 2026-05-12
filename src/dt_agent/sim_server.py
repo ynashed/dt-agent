@@ -201,6 +201,12 @@ def _impl_add_reference_to_stage(usd_path: str, prim_path: str) -> dict:
         if not prim.IsValid():
             return {"error": f"failed to create container prim at {prim_path}"}
     ok = prim.GetReferences().AddReference(usd_path)
+    # Many Isaac assets (Franka, UR10, others) compose their meshes via
+    # `payload:` arcs. AddReference alone doesn't auto-load payloads on a
+    # running stage — without Load(), the prim stays geometryless forever
+    # and get_prim_bounds returns empty boxes. LoadWithDescendants is the
+    # default, so this pulls in the whole asset subtree.
+    stage.Load(prim.GetPath())
     return {"ok": bool(ok), "prim_path": prim_path, "usd_path": usd_path}
 
 
@@ -601,7 +607,22 @@ def _impl_get_prim_bounds(prim_path: str) -> dict:
     bound = cache.ComputeWorldBound(prim)
     rng = bound.GetRange()
     if rng.IsEmpty():
-        return {"error": f"empty bounding box for {prim_path} — asset may not have resolved yet"}
+        # Differentiate "asset failed to compose" from "still loading" so the
+        # agent doesn't waste iterations re-trying a prim that will never
+        # resolve. Immediate children are enough signal — a working reference
+        # always brings in at least one child.
+        if not any(prim.GetChildren()):
+            return {"error": (
+                f"prim has no descendants at {prim_path} — the reference "
+                "appears to have failed to compose. Verify the usd_path is "
+                "reachable and points at a USD with a valid default prim. "
+                "Retrying will not help."
+            )}
+        return {"error": (
+            f"prim at {prim_path} has descendants but no renderable geometry "
+            "in [default, render] purposes — children may be Xform-only, "
+            "guide-purpose, or proxy-purpose."
+        )}
     mn, mx = rng.GetMin(), rng.GetMax()
     sz = mx - mn
     return {
