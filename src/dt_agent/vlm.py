@@ -16,8 +16,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import re
-import sys
 from pathlib import Path
 
 from openai import OpenAI
@@ -98,12 +96,7 @@ Rules — follow these EXACTLY:
   problem AND correction_hint MUST be a non-null actionable string.
 - If intent_satisfied is true: issues MUST be [] and correction_hint MUST
   be null.
-- Length budget: keep `observed` under 200 characters total. Each `issues`
-  entry under 100 characters. Be terse — name what you see, do not narrate,
-  elaborate, or describe lighting/mood/style. Overlong responses get
-  truncated mid-stream and discarded.
-
-Emit ONLY the JSON object. No markdown fences, no preamble, no commentary."""
+- Be terse: name what you see, do not narrate lighting, mood, or style."""
 
 
 def _data_uri(path: str | Path) -> str:
@@ -119,91 +112,34 @@ def _data_uri(path: str | Path) -> str:
     return f"data:image/{suffix};base64,{b64}"
 
 
-_THINK_BLOCK = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
-_INCOMPLETE_THINK = re.compile(r"<think>.*$", flags=re.DOTALL)
-_MISSING_COMMA = re.compile(r'("\s*)\n(\s*)(?=")')
-
-
-def _strip_fences(text: str) -> str:
-    """Defensive cleanup of the model's response before json.loads.
-
-    Handles two things despite the system prompt telling the model not to:
-      1. ```json ... ``` markdown fences (sometimes added by chat models).
-      2. <think>...</think> reasoning blocks (Cosmos Reason can emit
-         chain-of-thought before the JSON if reasoning mode is on).
-    """
-    text = text.strip()
-    text = _THINK_BLOCK.sub("", text).strip()
-    # Strip an incomplete think block (token limit hit before </think>).
-    text = _INCOMPLETE_THINK.sub("", text).strip()
-    if not text.startswith("```"):
-        return text
-    lines = text.splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip().startswith("```"):
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
-
-
-def _try_repair_json(text: str) -> str | None:
-    """Minimal fixup for the most common LLM JSON-emission bug: a missing
-    comma between two adjacent string-keyed properties (the model emits
-    `"value"\\n  "next_key":` instead of `"value",\\n  "next_key":`).
-    Returns None if no repair was applied."""
-    repaired = _MISSING_COMMA.sub(r'\1,\n\2', text)
-    return repaired if repaired != text else None
-
-
-def _try_repair_truncated_json(text: str) -> str | None:
-    """Repair JSON cut off by a token limit — the most common form is an
-    unterminated string in the `observed` field. Closes open strings, FORCES
-    intent_satisfied=false (a truncated response cannot be trusted as a
-    positive verdict — the model may have committed to `true` before getting
-    cut off mid-observed), injects any missing required fields, and closes
-    the object. Returns None if the result still doesn't parse."""
-    candidate = _MISSING_COMMA.sub(r'\1,\n\2', text).rstrip()
-
-    # Count unescaped double-quotes; odd count means we're inside a string.
-    if sum(1 for _ in re.finditer(r'(?<!\\)"', candidate)) % 2 == 1:
-        candidate += '"'
-
-    # Force a negative verdict. Better to false-fail (agent re-observes) than
-    # false-pass (save-gate trusts a truncated "true" and writes a bad scene).
-    candidate = re.sub(
-        r'"intent_satisfied"\s*:\s*true',
-        '"intent_satisfied": false',
-        candidate,
-    )
-
-    has_issues = '"issues"' in candidate
-    has_hint = '"correction_hint"' in candidate
-
-    extras = []
-    if not has_issues:
-        extras.append('"issues": ["VLM response was truncated; assessment incomplete"]')
-    if not has_hint:
-        extras.append('"correction_hint": "Observation was truncated mid-response — re-observe with a tighter intent or a different camera angle."')
-
-    if extras:
-        if not candidate.rstrip().endswith(','):
-            candidate += ','
-        candidate += ' ' + ', '.join(extras)
-
-    candidate += '}'
-
-    try:
-        json.loads(candidate)
-        return candidate
-    except json.JSONDecodeError:
-        return None
-
-
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "://vlm:", "://vlm/")
 
 
 def _is_local_endpoint(url: str) -> bool:
     return any(needle in url for needle in _LOCAL_HOSTS)
+
+
+_FAILED_DIR = Path(__file__).resolve().parents[2] / "output" / "vlm_failures"
+
+
+def _dump_failed_response(raw: str, intent: str, err: Exception) -> str:
+    """Write a malformed VLM response to disk for offline inspection.
+    Includes the intent (for reproduction) and the parse error alongside
+    the raw text. Should be rare under json_schema enforcement, but kept
+    as a safety net for proxies that silently ignore response_format."""
+    try:
+        _FAILED_DIR.mkdir(parents=True, exist_ok=True)
+        import time as _time
+        path = _FAILED_DIR / f"failed_{int(_time.time() * 1000)}.txt"
+        path.write_text(
+            f"intent: {intent}\n"
+            f"error: {type(err).__name__}: {err}\n"
+            f"--- raw response ({len(raw)} chars) ---\n"
+            f"{raw}\n"
+        )
+        return str(path)
+    except Exception as e:
+        return f"(failed to dump: {type(e).__name__}: {e})"
 
 
 def observe(
@@ -268,49 +204,12 @@ def observe(
     )
 
     raw = (response.choices[0].message.content or "").strip()
-    cleaned = _strip_fences(raw)
     try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as primary_err:
-        # Try repairs in order: comma fix → truncation fix.
-        for label, attempt in [
-            ("comma-repair", _try_repair_json(cleaned)),
-            ("truncation-repair", _try_repair_truncated_json(cleaned)),
-        ]:
-            if attempt is None:
-                continue
-            try:
-                data = json.loads(attempt)
-                print(f"[vlm] WARN: {label} fixed malformed JSON ({primary_err})", file=sys.stderr)
-                break
-            except json.JSONDecodeError:
-                continue
-        else:
-            dump_path = _dump_failed_response(raw, intent, primary_err)
-            raise RuntimeError(
-                f"VLM response was not valid JSON ({primary_err}). "
-                f"Full response written to {dump_path} for inspection."
-            ) from primary_err
+        data = json.loads(raw)
+    except json.JSONDecodeError as err:
+        dump_path = _dump_failed_response(raw, intent, err)
+        raise RuntimeError(
+            f"VLM response was not valid JSON ({err}). "
+            f"Full response written to {dump_path} for inspection."
+        ) from err
     return Observation.model_validate(data)
-
-
-_FAILED_DIR = Path(__file__).resolve().parents[2] / "output" / "vlm_failures"
-
-
-def _dump_failed_response(raw: str, intent: str, err: Exception) -> str:
-    """Dump a VLM response that broke all our parsers to disk so we can
-    inspect it offline and design a better repair. The dump includes the
-    intent (for reproduction) and the error message alongside the raw text."""
-    try:
-        _FAILED_DIR.mkdir(parents=True, exist_ok=True)
-        import time as _time
-        path = _FAILED_DIR / f"failed_{int(_time.time() * 1000)}.txt"
-        path.write_text(
-            f"intent: {intent}\n"
-            f"error: {type(err).__name__}: {err}\n"
-            f"--- raw response ({len(raw)} chars) ---\n"
-            f"{raw}\n"
-        )
-        return str(path)
-    except Exception as e:
-        return f"(failed to dump: {type(e).__name__}: {e})"
