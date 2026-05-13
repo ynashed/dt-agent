@@ -122,13 +122,18 @@ Workflow:
    - Step the sim in a loop (~300-1500 frames) while issuing actions.
    - Print progress to stdout so you can read it back from run_python output.
 4. Run: call `run_python(script_path)`. Returns {ok, stdout, stderr,
-   error?, elapsed_s}. Read stdout for your own progress prints and stderr
-   for any errors that occurred. A non-null `error` field is a Python
+   error?, elapsed_s, video_path, video_frame_count}. The harness
+   automatically records an mp4 of the observation camera throughout
+   the script's execution. Read stdout for your own progress prints
+   and stderr for any errors. A non-null `error` field is a Python
    exception with traceback.
-5. Observe: call `observe(intent)` to render the FINAL scene state and ask
-   the VLM whether the task succeeded. The intent should describe the
-   goal state ("the red cube is inside the blue container, gripper open
-   above the container").
+5. Observe: call `observe_video(video_path, intent)` with the
+   `video_path` from the run_python result. The VLM sees the whole
+   trajectory, not just the final pose — important for verifying motion
+   that returns to its starting position. The intent should describe
+   the visible behavior ("the robotic arm picks up the red cube,
+   carries it across, and places it in the blue container"). Reserve
+   `observe()` (single frame) for static checks where nothing moved.
 6. Iterate: if observe returns `intent_satisfied=false`, address the
    `issues` list and any stderr/traceback. Write a new script version
    (e.g. `pick_cube_v2.py`) and re-run. Keep older versions for reference.

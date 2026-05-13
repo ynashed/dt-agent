@@ -25,6 +25,7 @@ from dt_agent.tools import (
     _exec_search_assets_ai,
     sim_rpc,
 )
+from dt_agent.vlm import observe_video as _vlm_observe_video
 
 # Same path the sim_server sees inside the container — the docker-compose
 # mount makes /workspace/dt-agent/output/ on the host equal to inside the
@@ -64,6 +65,27 @@ def _exec_write_script(path: str, contents: str) -> dict:
 def _exec_run_python(script_path: str) -> dict:
     """Pass-through to the sim_server's run_python RPC."""
     return sim_rpc("run_python", script_path=script_path)
+
+
+# Container-side video paths translate to host paths the same way as captures.
+_OUTPUT_PREFIX_CONTAINER = "/workspace/dt-agent/output/"
+_OUTPUT_PREFIX_HOST = Path(__file__).resolve().parents[2] / "output"
+
+
+def _container_to_host_path(container_path: str) -> str:
+    if container_path.startswith(_OUTPUT_PREFIX_CONTAINER):
+        rel = container_path[len(_OUTPUT_PREFIX_CONTAINER):]
+        return str(_OUTPUT_PREFIX_HOST / rel)
+    return container_path
+
+
+def _exec_observe_video(video_path: str, intent: str) -> dict:
+    """Run Cosmos Reason against the mp4 recorded by run_python. Translates
+    the container-side path returned by run_python to the host path the VLM
+    wrapper reads from."""
+    host_path = _container_to_host_path(video_path)
+    obs = _vlm_observe_video(host_path, intent)
+    return obs.model_dump()
 
 
 _TOOL_DEFINITIONS_RAW: list[dict] = [
@@ -175,14 +197,33 @@ _TOOL_DEFINITIONS_RAW: list[dict] = [
     },
     {
         "type": "function",
+        "name": "observe_video",
+        "description": "Send the mp4 recorded by run_python to the VLM and ask whether the task succeeded. Prefer this over observe() for task verification — the video shows the whole trajectory, not just the final frame. Pass video_path from run_python's result.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "video_path": {
+                    "type": "string",
+                    "description": "Container-side path returned in run_python's `video_path` field.",
+                },
+                "intent": {
+                    "type": "string",
+                    "description": "What the task should have visibly accomplished (e.g. 'the robotic arm picked the red cube and placed it in the blue container').",
+                },
+            },
+            "required": ["video_path", "intent"],
+        },
+    },
+    {
+        "type": "function",
         "name": "observe",
-        "description": "Render the scene from the observation camera and ask the VLM whether it matches `intent`. Returns {intent_satisfied, observed, issues, correction_hint}. Call after run_python finishes to verify the task outcome. For large scenes pass eye/target so the camera frames the relevant area.",
+        "description": "Render a single still from the observation camera and ask the VLM what it sees. Use only for static checks (no motion involved); for task verification prefer observe_video which shows the whole trajectory.",
         "parameters": {
             "type": "object",
             "properties": {
                 "intent": {
                     "type": "string",
-                    "description": "What the final scene should look like (e.g. 'the red cube is inside the blue container').",
+                    "description": "What the scene should look like.",
                 },
                 "eye": {
                     "type": "array",
@@ -219,6 +260,7 @@ TOOL_EXECUTORS = {
     "write_script": lambda **kw: _exec_write_script(**kw),
     "run_python": lambda **kw: _exec_run_python(**kw),
     "save_stage": lambda **kw: sim_rpc("save_stage", **kw),
+    "observe_video": lambda **kw: _exec_observe_video(**kw),
     "observe": lambda **kw: _exec_observe(**kw),
 }
 

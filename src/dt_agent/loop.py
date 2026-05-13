@@ -71,7 +71,7 @@ def run_turn(
     edit_tools: set,
     progress_tools: set,
     edit_cadence: int,
-    observe_tool_name: str = "observe",
+    observe_tool_names: "tuple[str, ...]" = ("observe",),
     save_tool_name: str = "save_stage",
     max_iterations: int = 30,
     log: bool = True,
@@ -86,14 +86,18 @@ def run_turn(
     `history` is mutated in-place — the caller owns it across turns.
 
     Guard parameters:
-    - enforce_observe: intercept finish before observe_tool_name is called.
+    - enforce_observe: intercept finish before any observe_tool_names is called.
     - enforce_save:    intercept finish before save_tool_name succeeds.
     - edit_cadence:    block edit_tools after this many edits without an
                        intervening observe.
 
-    The observe/save tool names are parameterized so a non-authoring bundle
-    (e.g. robot-tasks) can plug in equivalents without forking the loop.
+    observe_tool_names is a tuple because a single agent may have multiple
+    observe variants (e.g. authoring uses {"observe"}; tasks uses
+    {"observe", "observe_video"}). Any of them counts toward the cadence
+    reset and the enforce_observe gate. The first element is used in
+    user-facing nudge messages.
     """
+    primary_observe = observe_tool_names[0]
     history.append({"role": "user", "content": message})
     save_succeeded = False
     stall_count = 0  # consecutive empty-response count; reset on any tool call
@@ -144,12 +148,12 @@ def run_turn(
             # Gate 1: require at least one observe before finishing.
             if enforce_observe and last_vlm_satisfied is None:
                 nudge = (
-                    f"You must call {observe_tool_name}() to verify the result "
+                    f"You must call {primary_observe}() to verify the result "
                     "before declaring done. Call it now with an appropriate intent."
                 )
                 history.append({"role": "user", "content": nudge})
                 if log:
-                    print(f"[agent]  NOTE: intercepted premature finish — {observe_tool_name}() not yet called", file=sys.stderr)
+                    print(f"[agent]  NOTE: intercepted premature finish — {primary_observe}() not yet called", file=sys.stderr)
                 trace("observe_nudge", iteration=iteration)
                 continue
 
@@ -193,13 +197,13 @@ def run_turn(
                 blocked_output = json.dumps({
                     "error": (
                         f"edit cadence limit: {edits_since_observe} edits since "
-                        f"the last {observe_tool_name}(). Call {observe_tool_name}(...) "
+                        f"the last {primary_observe}(). Call {primary_observe}(...) "
                         "now to verify, then resume."
                     )
                 })
                 if log:
                     print(
-                        f"[agent]  BLOCKED {name} — {edits_since_observe} edits without {observe_tool_name}",
+                        f"[agent]  BLOCKED {name} — {edits_since_observe} edits without {primary_observe}",
                         file=sys.stderr,
                     )
                 trace(
@@ -216,15 +220,15 @@ def run_turn(
                 issues_str = "; ".join(last_vlm_issues) if last_vlm_issues else "see correction_hint"
                 blocked_output = json.dumps({
                     "error": (
-                        f"{save_tool_name} blocked: the last {observe_tool_name}() "
+                        f"{save_tool_name} blocked: the last {primary_observe}() "
                         f"returned intent_satisfied=false (issues: {issues_str}). "
-                        f"Fix the listed issues and call {observe_tool_name}() again "
+                        f"Fix the listed issues and call {primary_observe}() again "
                         "to confirm before saving."
                     )
                 })
                 if log:
                     print(
-                        f"[agent]  BLOCKED {save_tool_name} — last {observe_tool_name}() not satisfied "
+                        f"[agent]  BLOCKED {save_tool_name} — last {primary_observe}() not satisfied "
                         f"(issues: {issues_str})",
                         file=sys.stderr,
                     )
@@ -240,7 +244,7 @@ def run_turn(
             output = _execute_tool(name, args, tool_executors)
 
             # Track observe outcomes so the save guard stays current.
-            if name == observe_tool_name:
+            if name in observe_tool_names:
                 try:
                     obs = json.loads(output)
                     last_vlm_satisfied = bool(obs.get("intent_satisfied"))
@@ -255,7 +259,6 @@ def run_turn(
                 try:
                     if json.loads(output).get("ok"):
                         save_succeeded = True
-                        last_vlm_satisfied = None  # reset guard after a successful save
                         edits_since_observe = 0
                 except Exception:
                     pass

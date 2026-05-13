@@ -746,19 +746,29 @@ def _impl_load_stage(file_path: str) -> dict:
     return {"ok": True, "file_path": file_path, "prim_count": prim_count}
 
 
+VIDEO_OUTPUT_DIR = "/workspace/dt-agent/output/videos"
+VIDEO_TARGET_FPS = 10
+
+
 def _impl_run_python(script_path: str) -> dict:
-    """Execute a Python script file on Kit's main thread.
+    """Execute a Python script on Kit's main thread, recording an mp4 of the
+    observation camera throughout the script's execution.
 
     The script runs with full access to Kit's bundled Python — it can
-    import omni, pxr, manipulate the stage, drive sim_app.update() to
-    step the renderer/physics, etc. stdout/stderr are captured.
-    Exceptions are caught and the traceback returned in `error` so the
-    agent can self-correct without crashing the server.
+    import omni, pxr, manipulate the stage, and call sim_app.update() /
+    world.step() to advance the renderer/physics. stdout/stderr are
+    captured. Exceptions are caught and the traceback returned in `error`
+    so the agent can self-correct without crashing the server.
 
-    PoC scope: no sandboxing. Scripts have the same privileges as the
-    Kit process. Single-user only.
+    Video recording is automatic: sim_app.update is patched to grab a
+    rendered frame from the default observation camera at ~VIDEO_TARGET_FPS,
+    so the agent sees the actual trajectory rather than just the final
+    pose. The mp4 path is returned in `video_path`.
 
-    Returns: {ok, stdout, stderr, error?, elapsed_s, script_path}
+    PoC scope: no sandboxing. Single-user only.
+
+    Returns: {ok, stdout, stderr, error?, elapsed_s, script_path,
+              video_path?, video_frame_count}
     """
     import contextlib  # noqa: PLC0415
     import io  # noqa: PLC0415
@@ -776,6 +786,91 @@ def _impl_run_python(script_path: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"failed to load script: {type(e).__name__}: {e}"}
 
+    # ── Video recording setup ────────────────────────────────────────────
+    try:
+        import cv2  # noqa: PLC0415
+        import omni.replicator.core as rep  # noqa: PLC0415
+    except Exception as e:
+        return {"ok": False, "error": f"video deps missing: {type(e).__name__}: {e}"}
+
+    cam_path = DEFAULT_OBSERVATION_CAMERA
+    resolution = DEFAULT_RESOLUTION
+    _ensure_observation_camera(cam_path, DEFAULT_CAMERA_EYE, DEFAULT_CAMERA_TARGET)
+    _ensure_default_lighting()
+
+    if (
+        _capture_state["camera_path"] != cam_path
+        or _capture_state["resolution"] != resolution
+        or _capture_state["render_product"] is None
+    ):
+        _capture_state["render_product"] = rep.create.render_product(cam_path, resolution)
+        _capture_state["annotator"] = rep.AnnotatorRegistry.get_annotator("LdrColor")
+        _capture_state["annotator"].attach([_capture_state["render_product"]])
+        _capture_state["camera_path"] = cam_path
+        _capture_state["resolution"] = resolution
+    annotator = _capture_state["annotator"]
+
+    os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
+    video_path = os.path.join(VIDEO_OUTPUT_DIR, f"run_{int(time.time() * 1000)}.mp4")
+    writer = cv2.VideoWriter(
+        video_path,
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        float(VIDEO_TARGET_FPS),
+        (int(resolution[0]), int(resolution[1])),
+    )
+    if not writer.isOpened():
+        return {"ok": False, "error": f"failed to open VideoWriter at {video_path}"}
+
+    # Warm-up renders so the annotator buffer is populated before the
+    # script starts (so the first patched-update grab gets a real frame).
+    for _ in range(5):
+        sim_app.update()
+    rep.orchestrator.step()
+    for _ in range(5):
+        sim_app.update()
+
+    grab_state = {
+        "last": 0.0,
+        "interval": 1.0 / VIDEO_TARGET_FPS,
+        "frames": 0,
+        "in_capture": False,  # re-entry guard: rep.orchestrator.step pumps updates
+    }
+
+    def _grab_frame():
+        try:
+            rep.orchestrator.step()
+            data = annotator.get_data()
+            if data is None or getattr(data, "size", 0) == 0:
+                return
+            bgr = (
+                cv2.cvtColor(data, cv2.COLOR_RGBA2BGR)
+                if data.shape[-1] == 4
+                else cv2.cvtColor(data, cv2.COLOR_RGB2BGR)
+            )
+            writer.write(bgr)
+            grab_state["frames"] += 1
+        except Exception as e:
+            print(f"[sim_server] WARN: video grab failed: {type(e).__name__}: {e}", flush=True)
+
+    _orig_update = sim_app.update
+
+    def _patched_update(*args, **kwargs):
+        result = _orig_update(*args, **kwargs)
+        if grab_state["in_capture"]:
+            return result
+        now = time.monotonic()
+        if now - grab_state["last"] >= grab_state["interval"]:
+            grab_state["in_capture"] = True
+            grab_state["last"] = now
+            try:
+                _grab_frame()
+            finally:
+                grab_state["in_capture"] = False
+        return result
+
+    sim_app.update = _patched_update
+
+    # ── Exec ─────────────────────────────────────────────────────────────
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
     script_globals: dict = {
@@ -792,6 +887,16 @@ def _impl_run_python(script_path: str) -> dict:
         error = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
     elapsed = time.time() - start
 
+    # ── Cleanup ──────────────────────────────────────────────────────────
+    sim_app.update = _orig_update
+    # One final grab so the post-script state is in the video.
+    grab_state["in_capture"] = True
+    try:
+        _grab_frame()
+    finally:
+        grab_state["in_capture"] = False
+    writer.release()
+
     return {
         "ok": error is None,
         "stdout": stdout_buf.getvalue(),
@@ -799,6 +904,8 @@ def _impl_run_python(script_path: str) -> dict:
         "error": error,
         "elapsed_s": round(elapsed, 3),
         "script_path": script_path,
+        "video_path": video_path,
+        "video_frame_count": grab_state["frames"],
     }
 
 

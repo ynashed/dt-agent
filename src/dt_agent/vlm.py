@@ -142,50 +142,56 @@ def _dump_failed_response(raw: str, intent: str, err: Exception) -> str:
         return f"(failed to dump: {type(e).__name__}: {e})"
 
 
-def observe(
-    image_path: str | Path,
+def _video_data_uri(path: str | Path) -> str:
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(str(p))
+    suffix = p.suffix.lower().lstrip(".")
+    if suffix not in {"mp4", "webm", "mov"}:
+        raise ValueError(f"unsupported video type: .{suffix}")
+    mime = "mp4" if suffix == "mov" else suffix
+    b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+    return f"data:video/{mime};base64,{b64}"
+
+
+def _resolve_api_key(effective_url: str, api_key: str | None) -> str:
+    api_key = api_key or os.environ.get("NV_VLM_API_KEY") or os.environ.get("NV_API_KEY")
+    if api_key:
+        return api_key
+    if _is_local_endpoint(effective_url):
+        # Self-hosted NIM (e.g. the docker-compose vlm service at
+        # http://localhost:8000/v1) doesn't authenticate the chat
+        # completions endpoint — but the OpenAI SDK requires a non-empty
+        # api_key parameter, so pass a placeholder.
+        return "not-needed"
+    raise RuntimeError(
+        "No API key available — set NV_API_KEY (or NV_VLM_API_KEY) "
+        "in the environment or .env, or point NV_VLM_BASE_URL at a "
+        "local NIM (e.g. http://localhost:8000/v1)."
+    )
+
+
+def _request_observation(
+    content_items: list,
     intent: str,
     *,
-    api_key: str | None = None,
-    base_url: str | None = None,
-    model: str | None = None,
-    max_tokens: int = 4096,
+    api_key: str | None,
+    base_url: str | None,
+    model: str | None,
+    max_tokens: int,
 ) -> Observation:
-    """Send a captured frame to Cosmos Reason and return a parsed Observation.
-
-    Raises FileNotFoundError if image_path doesn't exist, RuntimeError on
-    API/parse failures, and pydantic.ValidationError if the model returns
-    valid JSON but with the wrong shape.
-    """
+    """Common path for observe() and observe_video(). Sends the multimodal
+    user message to the VLM with strict json_schema response format, parses,
+    and validates."""
     effective_url = base_url or VLM_BASE_URL
-    api_key = api_key or os.environ.get("NV_VLM_API_KEY") or os.environ.get("NV_API_KEY")
-    if not api_key:
-        if _is_local_endpoint(effective_url):
-            # Self-hosted NIM (e.g. the docker-compose vlm service at
-            # http://localhost:8000/v1) doesn't authenticate the chat
-            # completions endpoint — but the OpenAI SDK requires a non-empty
-            # api_key parameter, so pass a placeholder.
-            api_key = "not-needed"
-        else:
-            raise RuntimeError(
-                "No API key available — set NV_API_KEY (or NV_VLM_API_KEY) "
-                "in the environment or .env, or point NV_VLM_BASE_URL at a "
-                "local NIM (e.g. http://localhost:8000/v1)."
-            )
-
+    api_key = _resolve_api_key(effective_url, api_key)
     client = OpenAI(api_key=api_key, base_url=effective_url)
 
     response = client.chat.completions.create(
         model=model or VLM_MODEL,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"Intent: {intent}"},
-                    {"type": "image_url", "image_url": {"url": _data_uri(image_path)}},
-                ],
-            },
+            {"role": "user", "content": content_items},
         ],
         max_tokens=max_tokens,
         temperature=0.0,
@@ -213,3 +219,55 @@ def observe(
             f"Full response written to {dump_path} for inspection."
         ) from err
     return Observation.model_validate(data)
+
+
+def observe(
+    image_path: str | Path,
+    intent: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    max_tokens: int = 4096,
+) -> Observation:
+    """Send a captured still frame to Cosmos Reason and return a parsed
+    Observation. Raises FileNotFoundError if image_path doesn't exist,
+    RuntimeError on API/parse failures, and pydantic.ValidationError if
+    the model returns valid JSON but with the wrong shape."""
+    return _request_observation(
+        [
+            {"type": "text", "text": f"Intent: {intent}"},
+            {"type": "image_url", "image_url": {"url": _data_uri(image_path)}},
+        ],
+        intent,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        max_tokens=max_tokens,
+    )
+
+
+def observe_video(
+    video_path: str | Path,
+    intent: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    max_tokens: int = 4096,
+) -> Observation:
+    """Send a recorded mp4 of a task run to Cosmos Reason. The local NIM
+    accepts base64 video_url; the server samples frames internally and
+    feeds them through the vision encoder. Returns the same Observation
+    shape as observe()."""
+    return _request_observation(
+        [
+            {"type": "text", "text": f"Intent: {intent}"},
+            {"type": "video_url", "video_url": {"url": _video_data_uri(video_path)}},
+        ],
+        intent,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        max_tokens=max_tokens,
+    )

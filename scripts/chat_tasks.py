@@ -79,11 +79,12 @@ def run_tasks_turn(message, history, client, trace, max_iter):
         edit_tools=EDIT_TOOLS,
         progress_tools=PROGRESS_TOOLS,
         edit_cadence=EDIT_CADENCE,
+        # Both observe and observe_video count toward the cadence reset
+        # and the enforce_observe gate; the task agent should prefer
+        # observe_video after run_python so the VLM sees the trajectory.
+        observe_tool_names=("observe_video", "observe"),
         max_iterations=max_iter,
         log=True,
-        # For tasks we always require observe before declaring done.
-        # save is optional — the agent decides whether to persist the
-        # post-task scene.
         enforce_observe=True,
         enforce_save=False,
     )
