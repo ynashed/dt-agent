@@ -30,6 +30,25 @@ from pydantic import BaseModel, Field
 VLM_BASE_URL = os.environ.get("NV_VLM_BASE_URL", "http://localhost:8000/v1")
 VLM_MODEL = os.environ.get("NV_VLM_MODEL", "nvidia/cosmos-reason2-8b")
 
+# Hard caps enforced at decode time by vLLM's xgrammar JSON-schema backend.
+# These are stricter than the prompt rule (which Cosmos Reason 2 8B has
+# been ignoring) and prevent the multi-KB `observed` strings that have
+# repeatedly blown past max_tokens and broken our repair fallbacks.
+_OBSERVATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "intent_satisfied": {"type": "boolean"},
+        "observed": {"type": "string", "maxLength": 240},
+        "issues": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 120},
+        },
+        "correction_hint": {"type": ["string", "null"]},
+    },
+    "required": ["intent_satisfied", "observed", "issues", "correction_hint"],
+    "additionalProperties": False,
+}
+
 
 class Observation(BaseModel):
     """Structured response the VLM emits about a captured frame."""
@@ -234,12 +253,18 @@ def observe(
         ],
         max_tokens=max_tokens,
         temperature=0.0,
-        # vLLM's xgrammar-backed structured output forces the model to
-        # emit valid JSON — fixes the common "missing comma between
-        # properties" bug we saw without this. Some non-vLLM proxies
-        # ignore this param silently; the repair fallback below catches
-        # those cases.
-        response_format={"type": "json_object"},
+        # json_schema (vLLM xgrammar) enforces the shape AND maxLength caps
+        # at decode time, so the model cannot emit a 19 KB `observed` field
+        # that overruns max_tokens mid-string. Strictly stronger than
+        # json_object, which only enforces "valid JSON".
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "observation",
+                "strict": True,
+                "schema": _OBSERVATION_SCHEMA,
+            },
+        },
     )
 
     raw = (response.choices[0].message.content or "").strip()
@@ -261,8 +286,31 @@ def observe(
             except json.JSONDecodeError:
                 continue
         else:
+            dump_path = _dump_failed_response(raw, intent, primary_err)
             raise RuntimeError(
                 f"VLM response was not valid JSON ({primary_err}). "
-                f"First 500 chars of response: {cleaned[:500]!r}"
+                f"Full response written to {dump_path} for inspection."
             ) from primary_err
     return Observation.model_validate(data)
+
+
+_FAILED_DIR = Path(__file__).resolve().parents[2] / "output" / "vlm_failures"
+
+
+def _dump_failed_response(raw: str, intent: str, err: Exception) -> str:
+    """Dump a VLM response that broke all our parsers to disk so we can
+    inspect it offline and design a better repair. The dump includes the
+    intent (for reproduction) and the error message alongside the raw text."""
+    try:
+        _FAILED_DIR.mkdir(parents=True, exist_ok=True)
+        import time as _time
+        path = _FAILED_DIR / f"failed_{int(_time.time() * 1000)}.txt"
+        path.write_text(
+            f"intent: {intent}\n"
+            f"error: {type(err).__name__}: {err}\n"
+            f"--- raw response ({len(raw)} chars) ---\n"
+            f"{raw}\n"
+        )
+        return str(path)
+    except Exception as e:
+        return f"(failed to dump: {type(e).__name__}: {e})"
