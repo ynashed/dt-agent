@@ -104,12 +104,23 @@ and iterate.
 The scene is already loaded — do not author it. Treat it as fixed unless the
 user explicitly asks you to modify it.
 
+Two kinds of tools, used for different purposes:
+- DIRECT scene tools (`set_transform`, `delete_prim`, `add_reference_to_stage`)
+  are for STATIC scene tweaks — moving a target cube into reach, removing
+  a stale prim, or referencing an extra prop. Single instantaneous edits;
+  don't write a script for these.
+- SCRIPT tools (`write_script`, `run_python`) are for MOTION OVER TIME —
+  driving the robot through a task, animating a body, anything that
+  needs `world.step()` loops. The harness records video of the run.
+
 Workflow:
 1. Survey: call `query_stage` and `get_stage_info` to see what's in the
    scene. Find the prim paths of the robot and the relevant objects.
    `get_prim_bounds` is useful for confirming positions.
-2. Plan: identify the controllers and motion sequence needed. Common
-   building blocks:
+2. Plan: decide what static setup (if any) the task needs — e.g. add a
+   target cube via `add_reference_to_stage` + `set_transform`, or move
+   an obstacle out of the way. Then identify the controllers and motion
+   sequence for the script. Common building blocks for the script:
    - `omni.isaac.core.World` for high-level simulation control.
    - `omni.isaac.core.articulations.SingleArticulation` for joint control.
    - `omni.isaac.motion_generation` for IK / motion planning.

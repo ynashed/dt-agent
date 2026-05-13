@@ -153,6 +153,53 @@ _TOOL_DEFINITIONS_RAW: list[dict] = [
     },
     {
         "type": "function",
+        "name": "set_transform",
+        "description": "Set translate (xyz meters), rotate (xyz Euler degrees), and/or scale on an existing prim. Use for STATIC repositioning of scene objects (move a target cube into reach, reorient the robot base, etc.) — cheaper and clearer than writing a script for it. For motion over time, use run_python instead.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prim_path": {"type": "string"},
+                "translate": {
+                    "type": "array", "items": {"type": "number"},
+                    "minItems": 3, "maxItems": 3,
+                },
+                "rotate": {
+                    "type": "array", "items": {"type": "number"},
+                    "minItems": 3, "maxItems": 3,
+                },
+                "scale": {
+                    "type": "array", "items": {"type": "number"},
+                    "minItems": 3, "maxItems": 3,
+                },
+            },
+            "required": ["prim_path"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "delete_prim",
+        "description": "Remove a prim and all its descendants from the stage. Use to clear stale setup artifacts or remove a prim that's blocking the task. Cannot remove `/`, `/World`, or `''`.",
+        "parameters": {
+            "type": "object",
+            "properties": {"prim_path": {"type": "string"}},
+            "required": ["prim_path"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "add_reference_to_stage",
+        "description": "Reference an external USD asset into the loaded scene. Use for setup: introducing target objects (e.g., a cube for pick-and-place) that aren't already in the authored scene. URLs come from search_assets / search_assets_ai.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "usd_path": {"type": "string"},
+                "prim_path": {"type": "string"},
+            },
+            "required": ["usd_path", "prim_path"],
+        },
+    },
+    {
+        "type": "function",
         "name": "write_script",
         "description": "Write a Python script to the shared volume. Path must start with /workspace/dt-agent/output/scripts/ so run_python can read it. The script can import omni, pxr, and use sim_app.update() / world.step() to step the simulation. Use versioned names (foo_v1.py, foo_v2.py) when iterating.",
         "parameters": {
@@ -257,6 +304,9 @@ TOOL_EXECUTORS = {
     "get_prim_bounds": lambda **kw: sim_rpc("get_prim_bounds", **kw),
     "search_assets": lambda **kw: sim_rpc("search_assets", **kw),
     "search_assets_ai": lambda **kw: _exec_search_assets_ai(**kw),
+    "set_transform": lambda **kw: sim_rpc("set_transform", **kw),
+    "delete_prim": lambda **kw: sim_rpc("delete_prim", **kw),
+    "add_reference_to_stage": lambda **kw: sim_rpc("add_reference_to_stage", **kw),
     "write_script": lambda **kw: _exec_write_script(**kw),
     "run_python": lambda **kw: _exec_run_python(**kw),
     "save_stage": lambda **kw: sim_rpc("save_stage", **kw),
@@ -272,4 +322,11 @@ EDIT_TOOLS = {"run_python"}
 EDIT_CADENCE = 3
 
 # Progress tools — what counts as forward motion for the auto-extend logic.
-PROGRESS_TOOLS = {"write_script", "run_python", "save_stage"}
+PROGRESS_TOOLS = {
+    "write_script",
+    "run_python",
+    "save_stage",
+    "set_transform",
+    "delete_prim",
+    "add_reference_to_stage",
+}
