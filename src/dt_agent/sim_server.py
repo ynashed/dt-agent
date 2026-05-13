@@ -916,15 +916,13 @@ def _impl_run_python(script_path: str) -> dict:
         except Exception as e:
             print(f"[sim_server] WARN: video grab failed: {type(e).__name__}: {e}", flush=True)
 
-    # Subscribe to Kit's update event stream instead of monkey-patching
-    # sim_app.update — scripts using omni.isaac.core.World.step() never
-    # call sim_app.update directly, so the previous patch saw only the
-    # final post-exec grab. Kit's update event fires on every tick
-    # regardless of who triggered it.
-    import omni.kit.app  # noqa: PLC0415
-    update_stream = omni.kit.app.get_app().get_update_event_stream()
-
-    def _on_kit_update(_event):
+    # Subscribe to BOTH Kit update events AND physics step events. Scripts
+    # using omni.isaac.core.World.step() advance physics through a path
+    # that bypasses Kit's main update event stream, so the kit-only hook
+    # only caught a couple of stray updates per multi-second run. Physics
+    # step events fire on every world.step() tick (60–240 Hz), which is
+    # plenty given the throttle.
+    def _maybe_grab():
         if grab_state["in_capture"]:
             return
         now = time.monotonic()
@@ -936,9 +934,22 @@ def _impl_run_python(script_path: str) -> dict:
             finally:
                 grab_state["in_capture"] = False
 
-    sub = update_stream.create_subscription_to_pop(
-        _on_kit_update, name="dt_agent_video_grab"
+    import omni.kit.app  # noqa: PLC0415
+    update_stream = omni.kit.app.get_app().get_update_event_stream()
+    kit_sub = update_stream.create_subscription_to_pop(
+        lambda _e: _maybe_grab(), name="dt_agent_video_grab_kit"
     )
+
+    physx_sub = None
+    try:
+        import omni.physx  # noqa: PLC0415
+        physx_iface = omni.physx.get_physx_interface()
+        # subscribe_physics_on_step_events(callback, pre_step, order)
+        physx_sub = physx_iface.subscribe_physics_on_step_events(
+            lambda _dt: _maybe_grab(), False, 0
+        )
+    except Exception as e:
+        print(f"[sim_server] WARN: physics step subscription unavailable: {e}", flush=True)
 
     # ── Exec ─────────────────────────────────────────────────────────────
     stdout_buf = io.StringIO()
@@ -958,8 +969,9 @@ def _impl_run_python(script_path: str) -> dict:
     elapsed = time.time() - start
 
     # ── Cleanup ──────────────────────────────────────────────────────────
-    # Dropping the subscription carrier releases it.
-    sub = None  # noqa: F841
+    # Dropping the subscription carriers releases them.
+    kit_sub = None  # noqa: F841
+    physx_sub = None  # noqa: F841
     # One final grab so the post-script state is in the video.
     grab_state["in_capture"] = True
     try:
