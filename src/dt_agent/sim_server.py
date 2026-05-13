@@ -723,6 +723,29 @@ def _impl_bind_material(prim_path: str, material_url: str) -> dict:
     return {"ok": True, "prim_path": prim_path, "material_prim_path": material_prim_path}
 
 
+def _impl_load_stage(file_path: str) -> dict:
+    """Open `file_path` as the working stage, replacing whatever is loaded.
+    Used by chat_tasks.py at startup to bring an authored scene into Kit
+    before the task agent starts scripting against it."""
+    if not os.path.isfile(file_path):
+        return {"ok": False, "error": f"file not found: {file_path}"}
+    ctx = omni.usd.get_context()
+    result = ctx.open_stage(file_path)
+    # open_stage may return either a bool or (success, msg) depending on Kit version.
+    if isinstance(result, tuple):
+        success, msg = result[0], (result[1] if len(result) > 1 else "")
+    else:
+        success, msg = bool(result), ""
+    if not success:
+        return {"ok": False, "error": f"open_stage failed: {msg}"}
+    # Pump a few frames so the load completes before we report.
+    for _ in range(5):
+        sim_app.update()
+    stage = ctx.get_stage()
+    prim_count = sum(1 for _ in stage.Traverse()) if stage else 0
+    return {"ok": True, "file_path": file_path, "prim_count": prim_count}
+
+
 def _impl_run_python(script_path: str) -> dict:
     """Execute a Python script file on Kit's main thread.
 
@@ -792,6 +815,7 @@ TOOLS = {
     "delete_prim": _impl_delete_prim,
     "bind_material": _impl_bind_material,
     "run_python": _impl_run_python,
+    "load_stage": _impl_load_stage,
 }
 
 
