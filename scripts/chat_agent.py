@@ -37,9 +37,9 @@ from dt_agent.agent import (
     LLM_MODEL,
     SIM_BASE_URL,
     _TRACE_DIR,
-    _make_tracer,
     run_turn,
 )
+from dt_agent.loop import make_tracer
 
 
 def _banner():
@@ -74,7 +74,7 @@ def main():
 
     _TRACE_DIR.mkdir(parents=True, exist_ok=True)
     trace_path = _TRACE_DIR / f"chat_{int(time.time() * 1000)}.jsonl"
-    trace = _make_tracer(trace_path)
+    trace = make_tracer(trace_path)
 
     _banner()
     print(f"  trace: {trace_path}", end="\n\n")
