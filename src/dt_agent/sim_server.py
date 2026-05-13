@@ -882,13 +882,36 @@ def _impl_run_python(script_path: str) -> dict:
             rep.orchestrator.step()
             data = annotator.get_data()
             if data is None or getattr(data, "size", 0) == 0:
+                if grab_state["frames"] < 3:
+                    print(
+                        f"[sim_server] video grab: empty data "
+                        f"(attempt #{grab_state.get('attempts', 0)})",
+                        flush=True,
+                    )
+                grab_state["attempts"] = grab_state.get("attempts", 0) + 1
                 return
+            if grab_state["frames"] < 3:
+                print(
+                    f"[sim_server] video frame #{grab_state['frames']}: "
+                    f"data.shape={tuple(data.shape)} dtype={data.dtype} "
+                    f"min={int(data.min())} max={int(data.max())} "
+                    f"writer_open={writer.isOpened()}",
+                    flush=True,
+                )
             bgr = (
                 cv2.cvtColor(data, cv2.COLOR_RGBA2BGR)
                 if data.shape[-1] == 4
                 else cv2.cvtColor(data, cv2.COLOR_RGB2BGR)
             )
-            writer.write(bgr)
+            if grab_state["frames"] < 3:
+                print(
+                    f"[sim_server] video frame #{grab_state['frames']} bgr: "
+                    f"shape={tuple(bgr.shape)} dtype={bgr.dtype} contiguous={bgr.flags['C_CONTIGUOUS']}",
+                    flush=True,
+                )
+            ok = writer.write(bgr)
+            if grab_state["frames"] < 3:
+                print(f"[sim_server] video frame #{grab_state['frames']} writer.write returned: {ok}", flush=True)
             grab_state["frames"] += 1
         except Exception as e:
             print(f"[sim_server] WARN: video grab failed: {type(e).__name__}: {e}", flush=True)
