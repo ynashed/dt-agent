@@ -746,7 +746,7 @@ def _impl_load_stage(file_path: str) -> dict:
     return {"ok": True, "file_path": file_path, "prim_count": prim_count}
 
 
-VIDEO_OUTPUT_DIR = "/workspace/dt-agent/output/videos"
+VIDEO_OUTPUT_DIR = "/workspace/dt-agent/output/captures"
 # Lower fps + lower resolution than capture_viewport stills, because the
 # Qwen3VL processor in the Cosmos Reason NIM 400s on the larger payloads
 # we were producing at 10 fps × 1280×720. 3 fps × 640×360 keeps total
