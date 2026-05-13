@@ -847,7 +847,7 @@ def _impl_run_python(script_path: str) -> dict:
         return {"ok": False, "error": f"failed to open VideoWriter at {video_path}"}
 
     # Warm-up renders so the annotator buffer is populated before the
-    # script starts (so the first patched-update grab gets a real frame).
+    # subscription starts (so the first grab gets a real frame).
     for _ in range(5):
         sim_app.update()
     rep.orchestrator.step()
@@ -858,7 +858,7 @@ def _impl_run_python(script_path: str) -> dict:
         "last": 0.0,
         "interval": 1.0 / VIDEO_TARGET_FPS,
         "frames": 0,
-        "in_capture": False,  # re-entry guard: rep.orchestrator.step pumps updates
+        "in_capture": False,  # re-entry guard: rep.orchestrator.step pumps Kit updates
     }
 
     def _grab_frame():
@@ -877,12 +877,17 @@ def _impl_run_python(script_path: str) -> dict:
         except Exception as e:
             print(f"[sim_server] WARN: video grab failed: {type(e).__name__}: {e}", flush=True)
 
-    _orig_update = sim_app.update
+    # Subscribe to Kit's update event stream instead of monkey-patching
+    # sim_app.update — scripts using omni.isaac.core.World.step() never
+    # call sim_app.update directly, so the previous patch saw only the
+    # final post-exec grab. Kit's update event fires on every tick
+    # regardless of who triggered it.
+    import omni.kit.app  # noqa: PLC0415
+    update_stream = omni.kit.app.get_app().get_update_event_stream()
 
-    def _patched_update(*args, **kwargs):
-        result = _orig_update(*args, **kwargs)
+    def _on_kit_update(_event):
         if grab_state["in_capture"]:
-            return result
+            return
         now = time.monotonic()
         if now - grab_state["last"] >= grab_state["interval"]:
             grab_state["in_capture"] = True
@@ -891,9 +896,10 @@ def _impl_run_python(script_path: str) -> dict:
                 _grab_frame()
             finally:
                 grab_state["in_capture"] = False
-        return result
 
-    sim_app.update = _patched_update
+    sub = update_stream.create_subscription_to_pop(
+        _on_kit_update, name="dt_agent_video_grab"
+    )
 
     # ── Exec ─────────────────────────────────────────────────────────────
     stdout_buf = io.StringIO()
@@ -913,7 +919,8 @@ def _impl_run_python(script_path: str) -> dict:
     elapsed = time.time() - start
 
     # ── Cleanup ──────────────────────────────────────────────────────────
-    sim_app.update = _orig_update
+    # Dropping the subscription carrier releases it.
+    sub = None  # noqa: F841
     # One final grab so the post-script state is in the video.
     grab_state["in_capture"] = True
     try:
@@ -921,6 +928,17 @@ def _impl_run_python(script_path: str) -> dict:
     finally:
         grab_state["in_capture"] = False
     writer.release()
+
+    # Log video stats to docker logs for diagnostic visibility.
+    try:
+        file_size = os.path.getsize(video_path) if os.path.isfile(video_path) else 0
+    except Exception:
+        file_size = 0
+    print(
+        f"[sim_server] video: frames={grab_state['frames']} "
+        f"bytes={file_size} path={video_path}",
+        flush=True,
+    )
 
     return {
         "ok": error is None,
@@ -931,6 +949,7 @@ def _impl_run_python(script_path: str) -> dict:
         "script_path": script_path,
         "video_path": video_path,
         "video_frame_count": grab_state["frames"],
+        "video_bytes": file_size,
     }
 
 
