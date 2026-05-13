@@ -529,6 +529,16 @@ def _impl_capture_viewport(
         _capture_state["annotator"].attach([_capture_state["render_product"]])
         _capture_state["camera_path"] = cam_path
         _capture_state["resolution"] = res
+    else:
+        # Defensive re-attach: AnnotatorRegistry returns a singleton per
+        # annotator name, and Annotator.attach replaces (not appends) the
+        # attachment list. If run_python attached the same annotator to its
+        # video render product, our still product was silently detached.
+        # Re-attach so get_data() below sees a valid product.
+        try:
+            _capture_state["annotator"].attach([_capture_state["render_product"]])
+        except Exception:
+            pass
 
     # rep.orchestrator.step() returns before the render fully lands, so we
     # bracket it with extra Kit updates to let textures, materials, lights,
@@ -863,6 +873,12 @@ def _impl_run_python(script_path: str) -> dict:
 
     def _grab_frame():
         try:
+            # Defensive re-attach (LdrColor is a singleton across video and
+            # still flows; the other tool may have stolen the attachment).
+            try:
+                annotator.attach([_video_capture_state["render_product"]])
+            except Exception:
+                pass
             rep.orchestrator.step()
             data = annotator.get_data()
             if data is None or getattr(data, "size", 0) == 0:
