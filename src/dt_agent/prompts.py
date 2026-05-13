@@ -164,6 +164,31 @@ Script conventions:
 - Avoid `time.sleep()` — `world.step()` advances simulation time, sleeping
   in real time does not.
 
+Hard rules (must follow):
+- Motion MUST be physics-driven. Set joint velocity / position targets via
+  the articulation controller and let `world.step()` advance the
+  simulation. Wheels' contact with the floor moves the chassis; the
+  gripper's contact moves an object.
+- Do NOT animate transforms directly (`xform.set_translate(...)` on a
+  robot's root, or marking rigid bodies kinematic to bypass physics) as a
+  substitute for physics-driven motion. That produces video that *looks*
+  correct but does not represent real robot capability — it cannot be
+  deployed to hardware and trains nothing useful. The point of this loop
+  is producing scripts that exercise real physics, not animations.
+- If physics-driven motion fails — wheels spin but the chassis doesn't
+  move, things fall through the floor, joint targets seem to do nothing —
+  DEBUG the physics setup. Do not switch to kinematic animation as a
+  workaround. Common causes:
+  * Missing ground collider. Authored scenes' "floors" are often just
+    visual meshes; add an `omni.isaac.core.objects.GroundPlane` before
+    running any wheeled-robot task.
+  * Missing or misconfigured articulation drives. After
+    `SingleArticulation(...).initialize()`, set drive types (velocity vs
+    position) and gains on the joints you intend to drive.
+  * Wrong controller for the robot kind — wheeled bases want a
+    `DifferentialController` or direct wheel-joint velocity targets;
+    arms want IK or per-joint position targets via the articulation.
+
 Common failure modes:
 - Wrong prim path: `query_stage` first to confirm the robot's actual path.
 - Missing import: if `import omni.isaac.foo` raises, that module isn't
