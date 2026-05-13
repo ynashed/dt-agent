@@ -723,6 +723,62 @@ def _impl_bind_material(prim_path: str, material_url: str) -> dict:
     return {"ok": True, "prim_path": prim_path, "material_prim_path": material_prim_path}
 
 
+def _impl_run_python(script_path: str) -> dict:
+    """Execute a Python script file on Kit's main thread.
+
+    The script runs with full access to Kit's bundled Python — it can
+    import omni, pxr, manipulate the stage, drive sim_app.update() to
+    step the renderer/physics, etc. stdout/stderr are captured.
+    Exceptions are caught and the traceback returned in `error` so the
+    agent can self-correct without crashing the server.
+
+    PoC scope: no sandboxing. Scripts have the same privileges as the
+    Kit process. Single-user only.
+
+    Returns: {ok, stdout, stderr, error?, elapsed_s, script_path}
+    """
+    import contextlib  # noqa: PLC0415
+    import io  # noqa: PLC0415
+    import traceback  # noqa: PLC0415
+
+    if not os.path.isfile(script_path):
+        return {"ok": False, "error": f"script not found: {script_path}"}
+
+    try:
+        with open(script_path) as f:
+            source = f.read()
+        code = compile(source, script_path, "exec")
+    except SyntaxError as e:
+        return {"ok": False, "error": f"SyntaxError: {e}"}
+    except Exception as e:
+        return {"ok": False, "error": f"failed to load script: {type(e).__name__}: {e}"}
+
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    script_globals: dict = {
+        "__name__": "__script__",
+        "__file__": script_path,
+    }
+
+    start = time.time()
+    error: str | None = None
+    try:
+        with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+            exec(code, script_globals)  # noqa: S102
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+    elapsed = time.time() - start
+
+    return {
+        "ok": error is None,
+        "stdout": stdout_buf.getvalue(),
+        "stderr": stderr_buf.getvalue(),
+        "error": error,
+        "elapsed_s": round(elapsed, 3),
+        "script_path": script_path,
+    }
+
+
 TOOLS = {
     "get_stage_info": _impl_get_stage_info,
     "query_stage": _impl_query_stage,
@@ -735,6 +791,7 @@ TOOLS = {
     "get_prim_bounds": _impl_get_prim_bounds,
     "delete_prim": _impl_delete_prim,
     "bind_material": _impl_bind_material,
+    "run_python": _impl_run_python,
 }
 
 
@@ -775,7 +832,10 @@ class RPCHandler(BaseHTTPRequestHandler):
             return
         fut = jobs.submit(TOOLS[tool], **args)
         try:
-            result = fut.result(timeout=60.0)
+            # 600s cap accommodates long-running run_python scripts that
+            # step the sim through a task. Other RPCs return in well under
+            # a second; the loose cap doesn't hurt them.
+            result = fut.result(timeout=600.0)
         except Exception as e:
             self._json(500, {"error": f"{type(e).__name__}: {e}"})
             return
