@@ -747,7 +747,22 @@ def _impl_load_stage(file_path: str) -> dict:
 
 
 VIDEO_OUTPUT_DIR = "/workspace/dt-agent/output/videos"
-VIDEO_TARGET_FPS = 10
+# Lower fps + lower resolution than capture_viewport stills, because the
+# Qwen3VL processor in the Cosmos Reason NIM 400s on the larger payloads
+# we were producing at 10 fps × 1280×720. 3 fps × 640×360 keeps total
+# video tokens well below the processor's implicit cap while still giving
+# the VLM enough frames to perceive motion across a typical task.
+VIDEO_TARGET_FPS = 3
+VIDEO_RESOLUTION = (640, 360)
+
+# Separate render product from capture_viewport's higher-res still product
+# (DEFAULT_RESOLUTION). Keeping them separate avoids recreating products
+# on every alternation between observe (still) and run_python (video).
+_video_capture_state = {
+    "render_product": None,
+    "annotator": None,
+    "camera_path": None,
+}
 
 
 def _impl_run_python(script_path: str) -> dict:
@@ -794,21 +809,31 @@ def _impl_run_python(script_path: str) -> dict:
         return {"ok": False, "error": f"video deps missing: {type(e).__name__}: {e}"}
 
     cam_path = DEFAULT_OBSERVATION_CAMERA
-    resolution = DEFAULT_RESOLUTION
     _ensure_observation_camera(cam_path, DEFAULT_CAMERA_EYE, DEFAULT_CAMERA_TARGET)
     _ensure_default_lighting()
 
+    # Video gets its own render product at VIDEO_RESOLUTION, separate from
+    # capture_viewport's still product at DEFAULT_RESOLUTION.
     if (
-        _capture_state["camera_path"] != cam_path
-        or _capture_state["resolution"] != resolution
-        or _capture_state["render_product"] is None
+        _video_capture_state["render_product"] is None
+        or _video_capture_state["camera_path"] != cam_path
     ):
-        _capture_state["render_product"] = rep.create.render_product(cam_path, resolution)
-        _capture_state["annotator"] = rep.AnnotatorRegistry.get_annotator("LdrColor")
-        _capture_state["annotator"].attach([_capture_state["render_product"]])
-        _capture_state["camera_path"] = cam_path
-        _capture_state["resolution"] = resolution
-    annotator = _capture_state["annotator"]
+        if _video_capture_state["render_product"] is not None:
+            try:
+                _video_capture_state["annotator"].detach(
+                    [_video_capture_state["render_product"]]
+                )
+            except Exception:
+                pass
+        _video_capture_state["render_product"] = rep.create.render_product(
+            cam_path, VIDEO_RESOLUTION
+        )
+        _video_capture_state["annotator"] = rep.AnnotatorRegistry.get_annotator("LdrColor")
+        _video_capture_state["annotator"].attach(
+            [_video_capture_state["render_product"]]
+        )
+        _video_capture_state["camera_path"] = cam_path
+    annotator = _video_capture_state["annotator"]
 
     os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
     video_path = os.path.join(VIDEO_OUTPUT_DIR, f"run_{int(time.time() * 1000)}.mp4")
@@ -816,7 +841,7 @@ def _impl_run_python(script_path: str) -> dict:
         video_path,
         cv2.VideoWriter_fourcc(*"mp4v"),
         float(VIDEO_TARGET_FPS),
-        (int(resolution[0]), int(resolution[1])),
+        (int(VIDEO_RESOLUTION[0]), int(VIDEO_RESOLUTION[1])),
     )
     if not writer.isOpened():
         return {"ok": False, "error": f"failed to open VideoWriter at {video_path}"}
